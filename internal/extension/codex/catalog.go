@@ -268,13 +268,20 @@ func GenerateConfigToml(output io.Writer, modelAlias string, baseURL string, cod
 			return fmt.Errorf("write models catalog: %w", err)
 		}
 		fmt.Fprintf(output, "model_catalog_json = %q\n", catalogPath)
+		if cfg.AuthToken != "" {
+			if err := writeAuthJSON(filepath.Join(codexHome, "auth.json"), cfg.AuthToken); err != nil {
+				return fmt.Errorf("write auth.json: %w", err)
+			}
+		}
 	}
 
 	fmt.Fprintln(output)
 	fmt.Fprintln(output, "[model_providers.moonbridge]")
 	fmt.Fprintln(output, `name = "Moon Bridge"`)
 	fmt.Fprintf(output, "base_url = %q\n", valueOrDefault(baseURL, "http://"+config.DefaultAddr+"/v1"))
-	fmt.Fprintln(output, `env_key = "MOONBRIDGE_CLIENT_API_KEY"`)
+	if cfg.AuthToken != "" {
+		fmt.Fprintln(output, `requires_openai_auth = true`)
+	}
 	fmt.Fprintln(output, `wire_api = "responses"`)
 	fmt.Fprintln(output)
 	fmt.Fprintln(output, "[mcp_servers.deepwiki]")
@@ -282,4 +289,19 @@ func GenerateConfigToml(output io.Writer, modelAlias string, baseURL string, cod
 	fmt.Fprintln(output, "startup_timeout_sec = 3600")
 	fmt.Fprintln(output, "tool_timeout_sec = 3600")
 	return nil
+}
+
+// writeAuthJSON writes the API key into Codex's auth.json so that model_providers
+// using requires_openai_auth can find the bearer token.
+func writeAuthJSON(path, token string) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return json.NewEncoder(f).Encode(map[string]string{"openai_api_key": token})
 }
