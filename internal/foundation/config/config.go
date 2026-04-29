@@ -12,7 +12,6 @@ const (
 	// DefaultConfigPath is kept for callers that need the config file name.
 	// Use XDGDefaultConfigPath to resolve the CLI's default config location.
 	DefaultConfigPath          = DefaultConfigFileName
-	DefaultPluginConfigDirName = "plugins"
 	AppConfigDirName           = "moonbridge"
 	DefaultAddr                = "127.0.0.1:38440"
 )
@@ -74,7 +73,6 @@ type Config struct {
 	Cache          CacheConfig
 	ResponseProxy  ResponseProxyConfig
 	AnthropicProxy AnthropicProxyConfig
-	Plugins        map[string]map[string]any
 	Extensions     map[string]ExtensionSettings
 
 	extensionSpecs extensionSpecIndex
@@ -590,13 +588,6 @@ func boolOrDefault(value *bool, fallback bool) bool {
 	return *value
 }
 
-// PluginConfig returns the configuration for a named plugin.
-func (cfg Config) PluginConfig(name string) map[string]any {
-	if cfg.Plugins == nil {
-		return nil
-	}
-	return cfg.Plugins[name]
-}
 
 func (cfg Config) validateExtensions() error {
 	for _, spec := range cfg.extensionSpecs {

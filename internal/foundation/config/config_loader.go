@@ -20,7 +20,6 @@ type FileConfig struct {
 	Cache         CacheFileConfig                `yaml:"cache" json:"cache,omitempty"`
 	SystemPrompt  string                         `yaml:"system_prompt" json:"system_prompt,omitempty"`
 	Developer     DeveloperFileConfig            `yaml:"developer" json:"developer,omitempty"`
-	Plugins       map[string]any                 `yaml:"plugins" json:"plugins,omitempty"`
 	Extensions    map[string]ExtensionFileConfig `yaml:"extensions" json:"extensions,omitempty"`
 }
 
@@ -165,9 +164,6 @@ func LoadFromFileWithOptions(path string, opts LoadOptions) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	if err := loadPluginConfigFiles(path, &fileConfig); err != nil {
-		return Config{}, err
-	}
 	cfg, err := FromFileConfigWithOptions(fileConfig, opts)
 	if err != nil {
 		return Config{}, err
@@ -176,7 +172,6 @@ func LoadFromFileWithOptions(path string, opts LoadOptions) (Config, error) {
 }
 
 // LoadFromYAML parses YAML bytes into a Config. Unlike LoadFromFile, it does
-// not discover split plugin config files from the plugins/ directory; it only
 // processes the inline plugins: section of the provided YAML content.
 func LoadFromYAML(data []byte) (Config, error) {
 	return LoadFromYAMLWithOptions(data, LoadOptions{})
@@ -217,83 +212,6 @@ func XDGDefaultConfigPath() (string, error) {
 		base = filepath.Join(home, ".config")
 	}
 	return filepath.Join(base, AppConfigDirName, DefaultConfigFileName), nil
-}
-
-func loadPluginConfigFiles(configPath string, fileConfig *FileConfig) error {
-	pluginDir := filepath.Join(filepath.Dir(configPath), DefaultPluginConfigDirName)
-	entries, err := os.ReadDir(pluginDir)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return fmt.Errorf("read plugin config dir %s: %w", pluginDir, err)
-	}
-	seen := make(map[string]bool, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() || !isYAMLFile(entry.Name()) {
-			continue
-		}
-		baseName := strings.TrimSuffix(strings.TrimSuffix(entry.Name(), ".yaml"), ".yml")
-		if strings.TrimSpace(baseName) == "" {
-			continue
-		}
-		// Deduplicate: skip if we already processed a .yml variant of this base name.
-		if seen[baseName] {
-			continue
-		}
-		seen[baseName] = true
-		pluginPath := filepath.Join(pluginDir, entry.Name())
-		raw, err := os.ReadFile(pluginPath)
-		if err != nil {
-			return fmt.Errorf("read plugin config %s: %w", pluginPath, err)
-		}
-		pluginConfig, err := decodePluginConfig(raw)
-		if err != nil {
-			return fmt.Errorf("parse plugin config %s: %w", pluginPath, err)
-		}
-		// Skip empty or whitespace-only plugin files.
-		if len(pluginConfig) == 0 {
-			continue
-		}
-		mergePluginConfig(fileConfig, baseName, pluginConfig)
-	}
-	return nil
-}
-
-func mergePluginConfig(fileConfig *FileConfig, pluginName string, pluginConfig map[string]any) {
-	if fileConfig.Plugins == nil {
-		fileConfig.Plugins = make(map[string]any)
-	}
-	if existing, ok := fileConfig.Plugins[pluginName].(map[string]any); ok {
-		merged := make(map[string]any, len(existing)+len(pluginConfig))
-		for key, value := range existing {
-			merged[key] = value
-		}
-		for key, value := range pluginConfig {
-			merged[key] = value
-		}
-		fileConfig.Plugins[pluginName] = merged
-		return
-	}
-	fileConfig.Plugins[pluginName] = pluginConfig
-}
-
-func decodePluginConfig(data []byte) (map[string]any, error) {
-	if len(bytes.TrimSpace(data)) == 0 {
-		return map[string]any{}, nil
-	}
-	var pluginConfig map[string]any
-	if err := yaml.Unmarshal(data, &pluginConfig); err != nil {
-		return nil, err
-	}
-	if pluginConfig == nil {
-		return map[string]any{}, nil
-	}
-	return pluginConfig, nil
-}
-
-func isYAMLFile(name string) bool {
-	return strings.HasSuffix(name, ".yml") || strings.HasSuffix(name, ".yaml")
 }
 
 func FromFileConfig(fileConfig FileConfig) (Config, error) {
@@ -355,7 +273,6 @@ func FromFileConfigWithOptions(fileConfig FileConfig, opts LoadOptions) (Config,
 		Cache:             fromCacheFileConfig(fileConfig.Cache),
 		ResponseProxy:     FromResponseProxyFileConfig(fileConfig.Developer.Proxy.Response),
 		AnthropicProxy:    FromAnthropicProxyFileConfig(fileConfig.Developer.Proxy.Anthropic),
-		Plugins:           pluginsFromFileConfig(fileConfig.Plugins),
 		Extensions:        topExtensions,
 		extensionSpecs:    specs,
 	}
@@ -568,18 +485,3 @@ func fromCacheFileConfig(fileConfig CacheFileConfig) CacheConfig {
 	}
 }
 
-func pluginsFromFileConfig(raw map[string]any) map[string]map[string]any {
-	if len(raw) == 0 {
-		return nil
-	}
-	result := make(map[string]map[string]any, len(raw))
-	for name, cfg := range raw {
-		switch v := cfg.(type) {
-		case map[string]any:
-			result[name] = v
-		default:
-			// Skip non-map entries.
-		}
-	}
-	return result
-}
