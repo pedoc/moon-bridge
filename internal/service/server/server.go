@@ -523,7 +523,7 @@ func (server *Server) handleStream(writer http.ResponseWriter, request *http.Req
 	var streamErr string
 	for {
 		event, err := stream.Next()
-		if err == io.EOF {
+		if err == io.EOF || (err != nil && err.Error() == "EOF") {
 			break
 		}
 		if err != nil {

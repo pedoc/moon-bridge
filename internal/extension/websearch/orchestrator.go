@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 
 	"log/slog"
@@ -557,7 +558,7 @@ type staticStream struct {
 
 func (s *staticStream) Next() (anthropic.StreamEvent, error) {
 	if s.pos >= len(s.events) {
-		return anthropic.StreamEvent{}, fmt.Errorf("EOF")
+		return anthropic.StreamEvent{}, io.EOF
 	}
 	event := s.events[s.pos]
 	s.pos++
