@@ -14,24 +14,77 @@ import (
 // ---- FileConfig types ----
 
 type FileConfig struct {
-	Mode          string                           `yaml:"mode"`
-	Trace         TraceFileConfig                  `yaml:"trace,omitempty"`
-	TraceRequests bool                             `yaml:"trace_requests,omitempty"` // backward compat
-	Log           LogFileConfig                    `yaml:"log,omitempty"`
-	Server        ServerFileConfig                 `yaml:"server,omitempty"`
-	Defaults      DefaultsFileConfig               `yaml:"defaults,omitempty"`
-	Models        map[string]ModelDefFileConfig    `yaml:"models,omitempty"`
-	Providers     map[string]ProviderDefFileConfig `yaml:"providers,omitempty"`
-	Routes        map[string]RouteFileConfig       `yaml:"routes,omitempty"`
-	WebSearch     WebSearchFileConfig              `yaml:"web_search,omitempty"`
-	Cache         CacheFileConfig                  `yaml:"cache,omitempty"`
-	Persistence   PersistenceFileConfig            `yaml:"persistence,omitempty"`
-	Extensions    map[string]ExtensionFileConfig   `yaml:"extensions,omitempty"`
-	Proxy         ProxyFileConfig                  `yaml:"proxy,omitempty"`
+	Mode        string                           `yaml:"mode" json:"mode"`
+	Trace       TraceFileConfig                  `yaml:"trace,omitempty" json:"trace,omitempty"`
+	Log         LogFileConfig                    `yaml:"log,omitempty" json:"log,omitempty"`
+	Server      ServerFileConfig                 `yaml:"server,omitempty" json:"server,omitempty"`
+	Defaults    DefaultsFileConfig               `yaml:"defaults,omitempty" json:"defaults,omitempty"`
+	Models      map[string]ModelDefFileConfig    `yaml:"models,omitempty" json:"models,omitempty"`
+	Providers   map[string]ProviderDefFileConfig `yaml:"providers,omitempty" json:"providers,omitempty"`
+	Routes      map[string]RouteFileConfig       `yaml:"routes,omitempty" json:"routes,omitempty"`
+	WebSearch   WebSearchFileConfig              `yaml:"web_search,omitempty" json:"web_search,omitempty"`
+	Cache       CacheFileConfig                  `yaml:"cache,omitempty" json:"cache,omitempty"`
+	Persistence PersistenceFileConfig            `yaml:"persistence,omitempty" json:"persistence,omitempty"`
+	Extensions  map[string]ExtensionFileConfig   `yaml:"extensions,omitempty" json:"extensions,omitempty"`
+	Proxy       ProxyFileConfig                  `yaml:"proxy,omitempty" json:"proxy,omitempty"`
+}
+
+// UnmarshalYAML supports the old trace_requests field for backward compatibility.
+func (fc *FileConfig) UnmarshalYAML(value *yaml.Node) error {
+	// Re-encode the node and decode with KnownFields to preserve strict checking.
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(value); err != nil {
+		return err
+	}
+	enc.Close()
+	strictDec := yaml.NewDecoder(&buf)
+	strictDec.KnownFields(true)
+
+	type rawFileConfig struct {
+		Mode          string                           `yaml:"mode"`
+		Trace         TraceFileConfig                  `yaml:"trace,omitempty"`
+		TraceRequests *bool                            `yaml:"trace_requests,omitempty"`
+		Log           LogFileConfig                    `yaml:"log,omitempty"`
+		Server        ServerFileConfig                 `yaml:"server,omitempty"`
+		Defaults      DefaultsFileConfig               `yaml:"defaults,omitempty"`
+		Models        map[string]ModelDefFileConfig    `yaml:"models,omitempty"`
+		Providers     map[string]ProviderDefFileConfig `yaml:"providers,omitempty"`
+		Routes        map[string]RouteFileConfig       `yaml:"routes,omitempty"`
+		WebSearch     WebSearchFileConfig              `yaml:"web_search,omitempty"`
+		Cache         CacheFileConfig                  `yaml:"cache,omitempty"`
+		Persistence   PersistenceFileConfig            `yaml:"persistence,omitempty"`
+		Extensions    map[string]ExtensionFileConfig   `yaml:"extensions,omitempty"`
+		Proxy         ProxyFileConfig                  `yaml:"proxy,omitempty"`
+	}
+	var raw rawFileConfig
+	if err := strictDec.Decode(&raw); err != nil {
+		return err
+	}
+	*fc = FileConfig{
+		Mode:        raw.Mode,
+		Trace:       raw.Trace,
+		Log:         raw.Log,
+		Server:      raw.Server,
+		Defaults:    raw.Defaults,
+		Models:      raw.Models,
+		Providers:   raw.Providers,
+		Routes:      raw.Routes,
+		WebSearch:   raw.WebSearch,
+		Cache:       raw.Cache,
+		Persistence: raw.Persistence,
+		Extensions:  raw.Extensions,
+		Proxy:       raw.Proxy,
+	}
+	if raw.TraceRequests != nil && *raw.TraceRequests {
+		fc.Trace.Enabled = true
+	}
+	return nil
 }
 
 type TraceFileConfig struct {
-	Enabled bool `yaml:"enabled"`
+	Enabled bool `yaml:"enabled" json:"enabled"`
 }
 
 type ServerFileConfig struct {
@@ -45,55 +98,55 @@ type LogFileConfig struct {
 }
 
 type DefaultsFileConfig struct {
-	Model        string `yaml:"model"`
-	MaxTokens    int    `yaml:"max_tokens"`
-	SystemPrompt string `yaml:"system_prompt"`
+	Model        string `yaml:"model" json:"model"`
+	MaxTokens    int    `yaml:"max_tokens" json:"max_tokens,omitempty"`
+	SystemPrompt string `yaml:"system_prompt" json:"system_prompt,omitempty"`
 }
 
 type ModelDefFileConfig struct {
-	ContextWindow               int                              `yaml:"context_window,omitempty"`
-	MaxOutputTokens             int                              `yaml:"max_output_tokens,omitempty"`
-	DisplayName                 string                           `yaml:"display_name,omitempty"`
-	Description                 string                           `yaml:"description,omitempty"`
-	BaseInstructions            string                           `yaml:"base_instructions,omitempty"`
-	DefaultReasoningLevel       string                           `yaml:"default_reasoning_level,omitempty"`
-	SupportedReasoningLevels    []ReasoningLevelPresetFileConfig `yaml:"supported_reasoning_levels,omitempty"`
-	SupportsReasoningSummaries  *bool                            `yaml:"supports_reasoning_summaries,omitempty"`
-	DefaultReasoningSummary     string                           `yaml:"default_reasoning_summary,omitempty"`
-	InputModalities             []string                         `yaml:"input_modalities,omitempty"`
-	SupportsImageDetailOriginal *bool                            `yaml:"supports_image_detail_original,omitempty"`
-	WebSearch                   WebSearchFileConfig              `yaml:"web_search,omitempty"`
-	Extensions                  map[string]ExtensionFileConfig   `yaml:"extensions,omitempty"`
+	ContextWindow               int                              `yaml:"context_window,omitempty" json:"context_window,omitempty"`
+	MaxOutputTokens             int                              `yaml:"max_output_tokens,omitempty" json:"max_output_tokens,omitempty"`
+	DisplayName                 string                           `yaml:"display_name,omitempty" json:"display_name,omitempty"`
+	Description                 string                           `yaml:"description,omitempty" json:"description,omitempty"`
+	BaseInstructions            string                           `yaml:"base_instructions,omitempty" json:"base_instructions,omitempty"`
+	DefaultReasoningLevel       string                           `yaml:"default_reasoning_level,omitempty" json:"default_reasoning_level,omitempty"`
+	SupportedReasoningLevels    []ReasoningLevelPresetFileConfig `yaml:"supported_reasoning_levels,omitempty" json:"supported_reasoning_levels,omitempty"`
+	SupportsReasoningSummaries  *bool                            `yaml:"supports_reasoning_summaries,omitempty" json:"supports_reasoning_summaries,omitempty"`
+	DefaultReasoningSummary     string                           `yaml:"default_reasoning_summary,omitempty" json:"default_reasoning_summary,omitempty"`
+	InputModalities             []string                         `yaml:"input_modalities,omitempty" json:"input_modalities,omitempty"`
+	SupportsImageDetailOriginal *bool                            `yaml:"supports_image_detail_original,omitempty" json:"supports_image_detail_original,omitempty"`
+	WebSearch                   WebSearchFileConfig              `yaml:"web_search,omitempty" json:"web_search,omitempty"`
+	Extensions                  map[string]ExtensionFileConfig   `yaml:"extensions,omitempty" json:"extensions,omitempty"`
 }
 
 type OfferFileConfig struct {
-	Model        string                  `yaml:"model"`
-	UpstreamName string                  `yaml:"upstream_name,omitempty"`
-	Pricing      ModelPricingFileConfig  `yaml:"pricing,omitempty"`
-	Overrides    *ModelDefFileConfig     `yaml:"overrides,omitempty"`
+	Model        string                  `yaml:"model" json:"model"`
+	UpstreamName string                  `yaml:"upstream_name,omitempty" json:"upstream_name,omitempty"`
+	Pricing      ModelPricingFileConfig  `yaml:"pricing,omitempty" json:"pricing,omitempty"`
+	Overrides    *ModelDefFileConfig     `yaml:"overrides,omitempty" json:"overrides,omitempty"`
 }
 
 type ProviderDefFileConfig struct {
-	BaseURL    string                           `yaml:"base_url"`
-	APIKey     string                           `yaml:"api_key"`
-	Version    string                           `yaml:"version,omitempty"`
-	UserAgent  string                           `yaml:"user_agent,omitempty"`
-	Protocol   string                           `yaml:"protocol,omitempty"`
-	Priority   int                              `yaml:"priority,omitempty"`
-	WebSearch  WebSearchFileConfig              `yaml:"web_search,omitempty"`
-	Extensions map[string]ExtensionFileConfig   `yaml:"extensions,omitempty"`
-	Offers     []OfferFileConfig                `yaml:"offers,omitempty"`
+	BaseURL    string                           `yaml:"base_url" json:"base_url"`
+	APIKey     string                           `yaml:"api_key" json:"api_key"`
+	Version    string                           `yaml:"version,omitempty" json:"version,omitempty"`
+	UserAgent  string                           `yaml:"user_agent,omitempty" json:"user_agent,omitempty"`
+	Protocol   string                           `yaml:"protocol,omitempty" json:"protocol,omitempty"`
+	Priority   int                              `yaml:"priority,omitempty" json:"priority,omitempty"`
+	WebSearch  WebSearchFileConfig              `yaml:"web_search,omitempty" json:"web_search,omitempty"`
+	Extensions map[string]ExtensionFileConfig   `yaml:"extensions,omitempty" json:"extensions,omitempty"`
+	Offers     []OfferFileConfig                `yaml:"offers,omitempty" json:"offers,omitempty"`
 }
 
 type RouteFileConfig struct {
-	To            string                           `yaml:"to,omitempty"` // backward compat "provider/model"
-	Model         string                           `yaml:"model,omitempty"`
-	Provider      string                           `yaml:"provider,omitempty"`
-	DisplayName   string                           `yaml:"display_name,omitempty"`
-	Description   string                           `yaml:"description,omitempty"`
-	ContextWindow int                              `yaml:"context_window,omitempty"`
-	WebSearch     WebSearchFileConfig              `yaml:"web_search,omitempty"`
-	Extensions    map[string]ExtensionFileConfig   `yaml:"extensions,omitempty"`
+	To            string                           `yaml:"to,omitempty" json:"to,omitempty"` // backward compat "provider/model"
+	Model         string                           `yaml:"model,omitempty" json:"model,omitempty"`
+	Provider      string                           `yaml:"provider,omitempty" json:"provider,omitempty"`
+	DisplayName   string                           `yaml:"display_name,omitempty" json:"display_name,omitempty"`
+	Description   string                           `yaml:"description,omitempty" json:"description,omitempty"`
+	ContextWindow int                              `yaml:"context_window,omitempty" json:"context_window,omitempty"`
+	WebSearch     WebSearchFileConfig              `yaml:"web_search,omitempty" json:"web_search,omitempty"`
+	Extensions    map[string]ExtensionFileConfig   `yaml:"extensions,omitempty" json:"extensions,omitempty"`
 }
 
 func (cfg *RouteFileConfig) UnmarshalYAML(value *yaml.Node) error {
@@ -160,15 +213,15 @@ type CacheFileConfig struct {
 }
 
 type ProxyFileConfig struct {
-	Response  ProxyTargetFileConfig `yaml:"response,omitempty"`
-	Anthropic ProxyTargetFileConfig `yaml:"anthropic,omitempty"`
+	Response  ProxyTargetFileConfig `yaml:"response,omitempty" json:"response,omitempty"`
+	Anthropic ProxyTargetFileConfig `yaml:"anthropic,omitempty" json:"anthropic,omitempty"`
 }
 
 type ProxyTargetFileConfig struct {
-	BaseURL string `yaml:"base_url"`
-	APIKey  string `yaml:"api_key"`
-	Model   string `yaml:"model,omitempty"`
-	Version string `yaml:"version,omitempty"`
+	BaseURL string `yaml:"base_url" json:"base_url"`
+	APIKey  string `yaml:"api_key" json:"api_key"`
+	Model   string `yaml:"model,omitempty" json:"model,omitempty"`
+	Version string `yaml:"version,omitempty" json:"version,omitempty"`
 }
 
 // ---- Loading functions ----
@@ -250,7 +303,7 @@ func FromFileConfigWithOptions(fileConfig FileConfig, opts LoadOptions) (Config,
 	}
 
 	// Trace: prefer new trace.enabled, fall back to old trace_requests.
-	traceEnabled := fileConfig.Trace.Enabled || fileConfig.TraceRequests
+	traceEnabled := fileConfig.Trace.Enabled
 
 	// Web search: top-level or default.
 	webSearchSupport, err := parseWebSearchSupport(fileConfig.WebSearch.Support)

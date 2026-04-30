@@ -208,6 +208,20 @@ def migrate(input_path: str, output_path: str) -> None:
                 else:
                     route["model"] = to_val.strip()
 
+    # 10. Ensure all route model slugs have top-level model entries.
+    for alias, route in list(top_routes.items()):
+        if isinstance(route, dict):
+            model_slug = route.get("model", "")
+            if model_slug and model_slug not in top_models:
+                top_models[model_slug] = {
+                    "display_name": model_slug,
+                    "description": f"Model referenced by route {alias}",
+                }
+                warnings.warn(
+                    f"Route {alias!r} references model {model_slug!r} without a provider model definition; "
+                    f"created minimal top-level model entry"
+                )
+
     # Write output.
     if top_models:
         data["models"] = top_models
