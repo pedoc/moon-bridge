@@ -45,11 +45,14 @@ func TestBuildModelInfosFromConfigIncludesProviderModelsBeforeRouteFallback(t *t
 			},
 		},
 	})
-	if len(models) != 1 {
-		t.Fatalf("expected 1 model, got %d", len(models))
+	if len(models) != 2 {
+		t.Fatalf("expected 2 models (model(provider) + provider/model), got %d", len(models))
 	}
 	if models[0].Slug != "gpt-4o(openai)" {
-		t.Fatalf("slug = %q, want gpt-4o(openai)", models[0].Slug)
+		t.Fatalf("slug[0] = %q, want gpt-4o(openai)", models[0].Slug)
+	}
+	if models[1].Slug != "openai/gpt-4o" {
+		t.Fatalf("slug[1] = %q, want openai/gpt-4o", models[1].Slug)
 	}
 }
 
@@ -194,5 +197,46 @@ func TestBuildModelInfoFromRoutePropagatesInputModalities(t *testing.T) {
 	}
 	if !info.SupportsImageDetailOriginal {
 		t.Fatal("SupportsImageDetailOriginal should be true")
+	}
+}
+func TestDisplayNameFromSlug(t *testing.T) {
+	tests := []struct {
+		slug string
+		want string
+	}{
+		{"gpt-5.5", "GPT 5.5"},
+		{"gpt-5.5-codex", "GPT 5.5 Codex"},
+		{"gpt-4o", "GPT 4o"},
+		{"deepseek-v4-pro", "Deepseek V4 Pro"},
+		{"gp", "Gp"},
+		{"g", "G"},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.slug, func(t *testing.T) {
+			got := codex.DisplayNameFromSlug(tt.slug)
+			if got != tt.want {
+				t.Fatalf("displayNameFromSlug(%q) = %q, want %q", tt.slug, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildModelInfoFromRouteExplicitDisplayName(t *testing.T) {
+	info := codex.BuildModelInfoFromRoute("gpt-5.5", "openai", config.RouteEntry{
+		DisplayName: "My Custom Name",
+	})
+	if info.DisplayName != "My Custom Name" {
+		t.Fatalf("DisplayName = %q, want My Custom Name", info.DisplayName)
+	}
+	if info.Slug != "gpt-5.5" {
+		t.Fatalf("Slug = %q, want gpt-5.5", info.Slug)
+	}
+}
+
+func TestBuildModelInfoFromRouteAutoDisplayName(t *testing.T) {
+	info := codex.BuildModelInfoFromRoute("gpt-5.5-codex", "openai", config.RouteEntry{})
+	if info.DisplayName != "GPT 5.5 Codex" {
+		t.Fatalf("DisplayName = %q, want GPT 5.5 Codex", info.DisplayName)
 	}
 }

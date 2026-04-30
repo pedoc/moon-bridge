@@ -79,13 +79,46 @@ type ReasoningLevelPresetDTO struct {
 	Description string `json:"description"`
 }
 
+// DisplayNameFromSlug converts a slug like "gpt-5.5-codex" to "GPT 5.5 Codex".
+func DisplayNameFromSlug(slug string) string {
+	slug = strings.ReplaceAll(slug, "-", " ")
+	words := strings.Fields(slug)
+	for i, w := range words {
+		lower := strings.ToLower(w)
+		if isASCIIGPTPrefix(lower) {
+			words[i] = "GPT" + w[3:]
+			continue
+		}
+		words[i] = asciiTitle(w)
+	}
+	return strings.Join(words, " ")
+}
+
+// asciiTitle upper-cases the first ASCII letter and lower-cases the rest.
+func asciiTitle(s string) string {
+	if s == "" {
+		return ""
+	}
+	return strings.ToUpper(s[:1]) + strings.ToLower(s[1:])
+}
+
+// isASCIIGPTPrefix reports whether s starts with "gpt" using ASCII byte match.
+// It returns false for strings shorter than 3 bytes or non-ASCII prefixes.
+func isASCIIGPTPrefix(s string) bool {
+	if len(s) < 3 {
+		return false
+	}
+	lower := strings.ToLower(s)
+	return lower[:3] == "gpt"
+}
+
 // BuildModelInfoFromRoute creates a Codex-compatible ModelInfo from a route entry.
+// ownedBy is kept for API compatibility but no longer affects displayName.
 func BuildModelInfoFromRoute(alias string, ownedBy string, route config.RouteEntry) ModelInfo {
 	displayName := route.DisplayName
 	if displayName == "" {
-		displayName = alias
+		displayName = DisplayNameFromSlug(alias)
 	}
-	displayName = displayName + "(" + ownedBy + ")"
 	return newModelInfo(alias, displayName, route.Description, route.ContextWindow,
 		route.DefaultReasoningLevel, route.SupportedReasoningLevels,
 		route.SupportsReasoningSummaries, route.DefaultReasoningSummary,
@@ -133,13 +166,20 @@ func BuildModelInfosFromConfig(cfg config.Config) []ModelInfo {
 			modelNames = append(modelNames, name)
 		}
 		sort.Strings(modelNames)
-		for _, name := range modelNames {
-			slug := name + "(" + providerKey + ")"
-			if seen[slug] {
-				continue
-			}
-			seen[slug] = true
-			models = append(models, BuildModelInfoFromProviderModel(slug, providerKey, def.Models[name]))
+	for _, name := range modelNames {
+		// Emit both model(provider) and provider/model slugs so Codex can resolve
+		// metadata regardless of which format the user configures in config.toml.
+		slug := name + "(" + providerKey + ")"
+		if seen[slug] {
+			continue
+		}
+		seen[slug] = true
+		models = append(models, BuildModelInfoFromProviderModel(slug, providerKey, def.Models[name]))
+		directRef := providerKey + "/" + name
+		if !seen[directRef] {
+			seen[directRef] = true
+			models = append(models, BuildModelInfoFromProviderModel(directRef, providerKey, def.Models[name]))
+		}
 		}
 	}
 
@@ -295,10 +335,6 @@ func valueOrDefault(value string, fallback string) string {
 func GenerateConfigToml(output io.Writer, modelAlias string, baseURL string, codexHome string, cfg config.Config) error {
 	route := cfg.RouteFor(modelAlias)
 
-	// Transform "provider/model" format to "model(provider)" for Codex display.
-	if provider, modelName := config.ParseModelRef(modelAlias); provider != "" {
-		modelAlias = modelName + "(" + provider + ")"
-	}
 	fmt.Fprintf(output, "model = %q\n", modelAlias)
 	fmt.Fprintln(output, `model_provider = "moonbridge"`)
 	if route.ContextWindow > 0 {

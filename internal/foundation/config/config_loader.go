@@ -383,8 +383,6 @@ func buildRoutes(rawRoutes map[string]RouteFileConfig, providerDefs map[string]P
 				entry.OutputPrice = meta.OutputPrice
 				entry.CacheWritePrice = meta.CacheWritePrice
 				entry.CacheReadPrice = meta.CacheReadPrice
-				entry.DisplayName = meta.DisplayName
-				entry.Description = meta.Description
 				entry.DefaultReasoningLevel = meta.DefaultReasoningLevel
 				entry.SupportedReasoningLevels = meta.SupportedReasoningLevels
 				entry.SupportsReasoningSummaries = meta.SupportsReasoningSummaries
