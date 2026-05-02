@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,7 @@ import (
 	deepseekv4 "moonbridge/internal/extension/deepseek_v4"
 	"moonbridge/internal/extension/plugin"
 	"moonbridge/internal/extension/pluginhooks"
+	"moonbridge/internal/extension/visual"
 	"moonbridge/internal/foundation/config"
 	"moonbridge/internal/foundation/logger"
 	"moonbridge/internal/foundation/openai"
@@ -93,8 +95,9 @@ func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error)
 
 type captureCompletionPlugin struct {
 	plugin.BasePlugin
-	result plugin.RequestResult
-	called bool
+	result  plugin.RequestResult
+	results []plugin.RequestResult
+	called  bool
 }
 
 func (p *captureCompletionPlugin) Name() string { return "capture_completion" }
@@ -103,6 +106,7 @@ func (p *captureCompletionPlugin) EnabledForModel(string) bool {
 }
 func (p *captureCompletionPlugin) OnRequestCompleted(_ *plugin.RequestContext, result plugin.RequestResult) {
 	p.result = result
+	p.results = append(p.results, result)
 	p.called = true
 }
 
@@ -311,6 +315,188 @@ func TestStreamingCompletionMetricsKeepsStartFreshInputForCacheOnlyDelta(t *test
 	summary := sessionStats.Summary()
 	if summary.InputTokens != 85822 || summary.CacheRead != 85248 || summary.OutputTokens != 145 {
 		t.Fatalf("summary = %+v", summary)
+	}
+}
+
+func TestResponsesHandlerRecordsVisualToolUsageForBillingAndMetrics(t *testing.T) {
+	var mainCalls int
+	var visualCalls int
+
+	mainServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req anthropic.MessageRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode main request: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		mainCalls++
+		w.Header().Set("Content-Type", "application/json")
+		switch mainCalls {
+		case 1:
+			if req.Model != "claude-main" {
+				t.Errorf("main request model = %q, want claude-main", req.Model)
+			}
+			if len(req.Tools) == 0 {
+				t.Errorf("main request did not receive visual tools")
+			}
+			_ = json.NewEncoder(w).Encode(anthropic.MessageResponse{
+				ID:         "msg_tool",
+				Type:       "message",
+				Role:       "assistant",
+				StopReason: "tool_use",
+				Content: []anthropic.ContentBlock{{
+					Type:  "tool_use",
+					ID:    "toolu_visual",
+					Name:  visual.ToolVisualBrief,
+					Input: json.RawMessage(`{"image_urls":["https://example.test/a.png"],"context":"inspect"}`),
+				}},
+				Usage: anthropic.Usage{InputTokens: 100, OutputTokens: 10},
+			})
+		case 2:
+			if len(req.Messages) < 2 || req.Messages[len(req.Messages)-1].Content[0].Type != "tool_result" {
+				t.Errorf("follow-up request missing visual tool result: %+v", req.Messages)
+			}
+			_ = json.NewEncoder(w).Encode(anthropic.MessageResponse{
+				ID:         "msg_final",
+				Type:       "message",
+				Role:       "assistant",
+				StopReason: "end_turn",
+				Content:    []anthropic.ContentBlock{{Type: "text", Text: "final answer"}},
+				Usage:      anthropic.Usage{InputTokens: 50, OutputTokens: 8},
+			})
+		default:
+			t.Errorf("unexpected main call %d", mainCalls)
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	defer mainServer.Close()
+
+	visualServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req anthropic.MessageRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode visual request: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		visualCalls++
+		if req.Model != "kimi-vision" || req.MaxTokens != 256 {
+			t.Errorf("visual request model/max = %s/%d", req.Model, req.MaxTokens)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(anthropic.MessageResponse{
+			ID:         "msg_visual",
+			Type:       "message",
+			Role:       "assistant",
+			Model:      "kimi-vision",
+			StopReason: "end_turn",
+			Content:    []anthropic.ContentBlock{{Type: "text", Text: "visual result"}},
+			Usage:      anthropic.Usage{InputTokens: 20, OutputTokens: 5, CacheReadInputTokens: 7},
+		})
+	}))
+	defer visualServer.Close()
+
+	cfg, err := config.LoadFromYAMLWithOptions([]byte(fmt.Sprintf(`
+mode: Transform
+models:
+  claude-main:
+    extensions:
+      visual:
+        enabled: true
+  kimi-vision: {}
+providers:
+  main:
+    base_url: %s
+    api_key: main-key
+    offers:
+      - model: claude-main
+  vision:
+    base_url: %s
+    api_key: vision-key
+    offers:
+      - model: kimi-vision
+routes:
+  moonbridge:
+    model: claude-main
+    provider: main
+defaults:
+  max_tokens: 1024
+cache:
+  mode: off
+extensions:
+  visual:
+    config:
+      provider: vision
+      model: kimi-vision
+      max_rounds: 2
+      max_tokens: 256
+`, mainServer.URL, visualServer.URL)), config.LoadOptions{ExtensionSpecs: visual.ConfigSpecs()})
+	if err != nil {
+		t.Fatalf("LoadFromYAMLWithOptions() error = %v", err)
+	}
+
+	providerMgr, err := provider.NewProviderManager(map[string]provider.ProviderConfig{
+		"main":   {BaseURL: mainServer.URL, APIKey: "main-key", ModelNames: []string{"claude-main"}},
+		"vision": {BaseURL: visualServer.URL, APIKey: "vision-key", ModelNames: []string{"kimi-vision"}},
+	}, map[string]provider.ModelRoute{
+		"moonbridge": {Provider: "main", Name: "claude-main"},
+	})
+	if err != nil {
+		t.Fatalf("NewProviderManager() error = %v", err)
+	}
+
+	capture := &captureCompletionPlugin{}
+	registry := plugin.NewRegistry(nil)
+	registry.Register(visual.NewPlugin())
+	registry.Register(capture)
+	if err := registry.InitAll(&cfg); err != nil {
+		t.Fatalf("InitAll() error = %v", err)
+	}
+	sessionStats := stats.NewSessionStats()
+	sessionStats.SetPricing(map[string]stats.ModelPricing{
+		"moonbridge":         {InputPrice: 10, OutputPrice: 20},
+		"vision/kimi-vision": {InputPrice: 1, OutputPrice: 2, CacheReadPrice: 0.5},
+	})
+	handler := server.New(server.Config{
+		Bridge:         bridge.New(cfg, cache.NewMemoryRegistry(), pluginhooks.PluginHooksFromRegistry(registry)),
+		ProviderMgr:    providerMgr,
+		Stats:          sessionStats,
+		PluginRegistry: registry,
+		AppConfig:      cfg,
+	})
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(`{"model":"moonbridge","input":"inspect the image"}`))
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if mainCalls != 2 || visualCalls != 1 {
+		t.Fatalf("mainCalls=%d visualCalls=%d, want 2/1", mainCalls, visualCalls)
+	}
+	visualStats := sessionStats.Summary().ByModel["vision/kimi-vision"]
+	if visualStats == nil {
+		t.Fatalf("visual model stats missing: %+v", sessionStats.Summary().ByModel)
+	}
+	if visualStats.InputTokens != 27 || visualStats.CacheRead != 7 || visualStats.OutputTokens != 5 || visualStats.Cost <= 0 {
+		t.Fatalf("visual stats = %+v", visualStats)
+	}
+
+	var visualResult *plugin.RequestResult
+	for i := range capture.results {
+		if capture.results[i].Model == "vision/kimi-vision" {
+			visualResult = &capture.results[i]
+			break
+		}
+	}
+	if visualResult == nil {
+		t.Fatalf("visual completion metric missing: %+v", capture.results)
+	}
+	if visualResult.ActualModel != "kimi-vision" || visualResult.Usage.UsageSource != "visual_tool_call" {
+		t.Fatalf("visual completion identity = %+v", visualResult)
+	}
+	if visualResult.Usage.RawInputTokens != 20 || visualResult.Usage.RawCacheRead != 7 || visualResult.InputTokens != 27 {
+		t.Fatalf("visual completion usage = %+v", visualResult)
 	}
 }
 
@@ -1190,4 +1376,3 @@ func addAuth(req *http.Request, value string) *http.Request {
 	req.Header.Set("Authorization", value)
 	return req
 }
-

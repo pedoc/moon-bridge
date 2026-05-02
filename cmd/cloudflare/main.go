@@ -4,27 +4,25 @@ package main
 
 import (
 	"context"
+	"database/sql"
+	"log/slog"
 	"os"
 
-	"moonbridge/internal/service/app"
+	"github.com/syumai/workers"
+	"github.com/syumai/workers/cloudflare"
+	"github.com/syumai/workers/cloudflare/d1"
 
 	"moonbridge/internal/extension/pluginhooks"
 	"moonbridge/internal/foundation/config"
 	"moonbridge/internal/foundation/db"
-	"log/slog"
 	"moonbridge/internal/foundation/logger"
 	"moonbridge/internal/protocol/anthropic"
 	"moonbridge/internal/protocol/bridge"
 	"moonbridge/internal/protocol/cache"
+	"moonbridge/internal/service/app"
 	"moonbridge/internal/service/provider"
 	"moonbridge/internal/service/server"
 	"moonbridge/internal/service/stats"
-
-	"database/sql"
-	"github.com/syumai/workers"
-	"github.com/syumai/workers/cloudflare"
-
-	"github.com/syumai/workers/cloudflare/d1"
 )
 
 func main() {
@@ -174,7 +172,7 @@ func buildPricing(cfg config.Config) map[string]stats.ModelPricing {
 		for modelName, meta := range def.Models {
 			slug := providerKey + "/" + modelName
 			newSlug := modelName + "(" + providerKey + ")"
-			if _, exists := pricing[slug]; !exists && (meta.InputPrice > 0 || meta.OutputPrice > 0) {
+			if _, exists := pricing[slug]; !exists && (meta.InputPrice > 0 || meta.OutputPrice > 0 || meta.CacheWritePrice > 0 || meta.CacheReadPrice > 0) {
 				p := stats.ModelPricing{
 					InputPrice:      meta.InputPrice,
 					OutputPrice:     meta.OutputPrice,
