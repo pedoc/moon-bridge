@@ -397,6 +397,15 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 					Summary: []ReasoningItemSummary{},
 				})
 				send(StreamEvent{
+					Event: "response.output_item.added",
+					Data: OutputItemEvent{
+						Type:           "response.output_item.added",
+						SequenceNumber: next(),
+						OutputIndex:    io,
+						Item:           response.Output[io],
+					},
+				})
+				send(StreamEvent{
 					Event: "response.reasoning_summary_part.added",
 					Data: ReasoningSummaryPartAddedEvent{
 						Type:           "response.reasoning_summary_part.added",
