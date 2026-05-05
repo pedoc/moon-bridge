@@ -295,6 +295,7 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 		Status: "in_progress",
 	}
 	contentText := make(map[int]string)
+	toolCallArgs := make(map[int]string)
 	outputIndexes := make(map[int]int)
 	itemIDs := make(map[int]string)
 
@@ -476,6 +477,7 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 		// ==================================================================
 		case format.CoreToolCallArgsDelta:
 			index := event.Index
+			toolCallArgs[index] += event.Delta
 			out <- StreamEvent{
 				Event: "response.function_call_arguments.delta",
 				Data: FunctionCallArgumentsDeltaEvent{
@@ -579,18 +581,105 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 		// Content block done
 		// ==================================================================
 		case format.CoreContentBlockDone:
-			// Content block completion is implicit via TextDone/ToolCallArgsDone.
-			// No-op: the relevant done events are already emitted.
+			index := event.Index
 
-		// ==================================================================
-		// Output item lifecycle
-		// ==================================================================
+			// 1. Text/reasoning block done — emit output_text.done + content_part.done + output_item.done.
+			if text, ok := contentText[index]; ok {
+				itemID := itemIDs[index]
+				outputIndex := outputIndexes[index]
+
+				// output_text.done
+				out <- StreamEvent{
+					Event: "response.output_text.done",
+					Data: OutputTextDoneEvent{
+						Type:           "response.output_text.done",
+						SequenceNumber: next(),
+						ItemID:         itemID,
+						OutputIndex:    outputIndex,
+						ContentIndex:   0,
+						Text:           text,
+					},
+				}
+
+				// content_part.done
+				out <- StreamEvent{
+					Event: "response.content_part.done",
+					Data: ContentPartEvent{
+						Type:           "response.content_part.done",
+						SequenceNumber: next(),
+						ItemID:         itemID,
+						OutputIndex:    outputIndex,
+						ContentIndex:   0,
+						Part:           ContentPart{Type: "output_text"},
+					},
+				}
+
+				// Mark item as completed.
+				if idx, ok := outputIndexes[index]; ok && idx < len(response.Output) {
+					response.Output[idx].Status = "completed"
+				}
+
+				// output_item.done
+				out <- StreamEvent{
+					Event: "response.output_item.done",
+					Data: OutputItemEvent{
+						Type:           "response.output_item.done",
+						SequenceNumber: next(),
+						OutputIndex:    outputIndex,
+						Item:           response.Output[outputIndexes[index]],
+					},
+				}
+
+				// Clean up state.
+				delete(contentText, index)
+
+			} else if _, ok := outputIndexes[index]; ok {
+				// 2. Tool_use block done — emit function_call_arguments.done + output_item.done.
+				itemID := itemIDs[index]
+				outputIndex := outputIndexes[index]
+
+				// Update item with final accumulated arguments.
+				finalArgs := toolCallArgs[index]
+				if idx, ok := outputIndexes[index]; ok && idx < len(response.Output) {
+					if finalArgs != "" {
+						response.Output[idx].Arguments = finalArgs
+					}
+					response.Output[idx].Status = "completed"
+				}
+
+				// function_call_arguments.done
+				out <- StreamEvent{
+					Event: "response.function_call_arguments.done",
+					Data: FunctionCallArgumentsDoneEvent{
+						Type:           "response.function_call_arguments.done",
+						SequenceNumber: next(),
+						ItemID:         itemID,
+						OutputIndex:    outputIndex,
+						Arguments:      finalArgs,
+					},
+				}
+
+				// output_item.done
+				out <- StreamEvent{
+					Event: "response.output_item.done",
+					Data: OutputItemEvent{
+						Type:           "response.output_item.done",
+						SequenceNumber: next(),
+						OutputIndex:    outputIndex,
+						Item:           response.Output[outputIndexes[index]],
+					},
+				}
+
+				// Clean up state.
+				delete(toolCallArgs, index)
+			}
+
 		case format.CoreItemAdded:
 			// Item added is handled by content_block_start for tool_use
 			// and by first text delta for messages.
 
 		case format.CoreItemDone:
-			// Item completion is handled by text_done / tool_call_args_done.
+			// Item completion is handled by text_done / tool_call_args_done / content_block_done.
 
 		// ==================================================================
 		// Ping
