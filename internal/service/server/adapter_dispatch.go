@@ -483,8 +483,25 @@ func (s *Server) handleAdapterStream(
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
 
+	// Track usage from the final response.completed event.
+	var finalUsage openai.Usage
 	for ev := range streamChan {
+		if ev.Event == "response.completed" {
+			if lf, ok := ev.Data.(openai.ResponseLifecycleEvent); ok {
+				finalUsage = lf.Response.Usage
+			}
+		}
 		writeSSE(w, ev)
+	}
+
+	// Record usage statistics after stream completes.
+	if s.stats != nil && (finalUsage.InputTokens > 0 || finalUsage.OutputTokens > 0) {
+		s.stats.Record(openAIReq.Model, candidate.UpstreamModel, stats.Usage{
+			InputTokens:              finalUsage.InputTokens,
+			OutputTokens:             finalUsage.OutputTokens,
+			CacheCreationInputTokens: finalUsage.InputTokensDetails.CachedTokens,
+			CacheReadInputTokens:     0,
+		})
 	}
 }
 
