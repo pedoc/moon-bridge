@@ -382,6 +382,11 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 				itemIDs[index] = id
 				contentText[index] = ""
 
+
+			case "reasoning":
+				id := fmt.Sprintf("msg_item_%d", index)
+				itemIDs[index] = id
+				contentText[index] = ""
 			case "tool_use":
 				toolUseID := event.ContentBlock.ToolUseID
 				if toolUseID == "" {

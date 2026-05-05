@@ -153,8 +153,8 @@ type ErrorObject struct {
 // StreamEvent is a generic wrapper for SSE stream events.
 // Event holds the SSE event type string, Data holds the typed payload.
 type StreamEvent struct {
-	Event string
-	Data  any
+	Event string `json:"event"`
+	Data  any    `json:"data"`
 }
 
 // ResponseLifecycleEvent is emitted for response lifecycle events
