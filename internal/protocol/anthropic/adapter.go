@@ -2,8 +2,10 @@ package anthropic
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"sync"
 
 	"moonbridge/internal/foundation/config"
 	"moonbridge/internal/protocol/format"
@@ -45,6 +47,11 @@ type AnthropicProviderAdapter struct {
 	cfg      config.Config
 	cacheMgr CacheManager
 	hooks    format.CorePluginHooks
+
+	streamMu         sync.Mutex
+	streamEvents     []StreamEvent
+	streamEventsSize int
+	maxStreamBuffer  int
 }
 
 // NewAnthropicProviderAdapter creates a new AnthropicProviderAdapter.
@@ -56,6 +63,7 @@ func NewAnthropicProviderAdapter(cfg config.Config, cacheMgr CacheManager, hooks
 		cfg:      cfg,
 		cacheMgr: cacheMgr,
 		hooks:    hooks.WithDefaults(),
+		maxStreamBuffer: 4 * 1024 * 1024,
 	}
 }
 
@@ -204,6 +212,7 @@ type streamConverterState struct {
 	blockTypes      map[int]string // content index → block type
 	blockSignatures map[int]string // content index → reasoning signature (from signature_delta)
 	finalUsage      *format.CoreUsage // tracked from message_delta, passed to message_stop
+	adapter         *AnthropicProviderAdapter // for buffering raw stream events (trace)
 }
 
 // ToCoreStream consumes an anthropic.Stream and returns a channel of CoreStreamEvent.
@@ -217,6 +226,12 @@ func (a *AnthropicProviderAdapter) ToCoreStream(ctx context.Context, src any) (<
 	}
 	events := make(chan format.CoreStreamEvent, 64)
 
+	// Initialize stream event buffer for trace capture.
+	a.streamMu.Lock()
+	a.streamEvents = make([]StreamEvent, 0, 64)
+	a.streamEventsSize = 0
+	a.streamMu.Unlock()
+
 	go func() {
 		defer close(events)
 		defer stream.Close()
@@ -224,6 +239,7 @@ func (a *AnthropicProviderAdapter) ToCoreStream(ctx context.Context, src any) (<
 		state := &streamConverterState{
 			blockTypes:      make(map[int]string),
 			blockSignatures: make(map[int]string),
+			adapter:         a,
 		}
 
 		for {
@@ -263,6 +279,7 @@ func (a *AnthropicProviderAdapter) ToCoreStream(ctx context.Context, src any) (<
 // Stream event conversion
 // =========================================================================
 
+
 func (s *streamConverterState) nextSeq() int64 {
 	s.seqNum++
 	return s.seqNum
@@ -274,6 +291,10 @@ func (s *streamConverterState) emit(events chan<- format.CoreStreamEvent, ev for
 }
 
 func (s *streamConverterState) convertEvent(events chan<- format.CoreStreamEvent, ev StreamEvent) {
+	// Buffer the original event for trace (max 4MB).
+	if s.adapter != nil {
+		s.adapter.bufferStreamEvent(ev)
+	}
 	switch ev.Type {
 	case "message_start":
 		if ev.Message != nil {
@@ -436,8 +457,9 @@ func (s *streamConverterState) convertEvent(events chan<- format.CoreStreamEvent
 			Type: format.CorePing,
 		})
 	}
-}
 
+
+}
 // =========================================================================
 // Helpers: Core → Anthropic
 // =========================================================================
@@ -677,3 +699,27 @@ func (a *AnthropicProviderAdapter) mapStopReasonToStatus(reason string) string {
 		return "completed"
 	}
 }
+// bufferStreamEvent buffers the raw anthropic stream event for trace capture,
+// up to the 4MB limit. The event is JSON-marshalled to estimate its size.
+func (a *AnthropicProviderAdapter) bufferStreamEvent(ev StreamEvent) {
+	a.streamMu.Lock()
+	defer a.streamMu.Unlock()
+	if a.streamEventsSize >= a.maxStreamBuffer {
+		return // buffer full, skip
+	}
+	data, err := json.Marshal(ev)
+	if err == nil {
+		a.streamEventsSize += len(data)
+		if a.streamEventsSize <= a.maxStreamBuffer {
+			a.streamEvents = append(a.streamEvents, ev)
+		}
+	}
+}
+
+// StreamBuffer returns the buffered stream events for trace capture.
+func (a *AnthropicProviderAdapter) StreamBuffer() []StreamEvent {
+	a.streamMu.Lock()
+	defer a.streamMu.Unlock()
+	return a.streamEvents
+}
+

@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 
 	"moonbridge/internal/foundation/config"
 	"moonbridge/internal/protocol/format"
@@ -32,11 +33,20 @@ import (
 type OpenAIAdapter struct {
 	cfg   config.Config
 	hooks format.CorePluginHooks
+
+	streamMu         sync.Mutex
+	streamEvents     []StreamEvent
+	streamEventsSize int
+	maxStreamBuffer  int
 }
 
 // NewOpenAIAdapter creates a new OpenAIAdapter with the given config and hooks.
 func NewOpenAIAdapter(cfg config.Config, hooks format.CorePluginHooks) *OpenAIAdapter {
-	return &OpenAIAdapter{cfg: cfg, hooks: hooks.WithDefaults()}
+	return &OpenAIAdapter{
+		cfg:      cfg,
+		hooks:    hooks.WithDefaults(),
+		maxStreamBuffer: 4 * 1024 * 1024,
+	}
 }
 
 // ClientProtocol returns the inbound protocol identifier.
@@ -279,9 +289,39 @@ func (a *OpenAIAdapter) FromCoreStream(ctx context.Context, req *format.CoreRequ
 	return (<-chan StreamEvent)(out), nil
 }
 
+// bufferStreamEvent buffers the OpenAI stream event for trace capture,
+// up to the 4MB limit. The event is JSON-marshalled to estimate its size.
+func (a *OpenAIAdapter) bufferStreamEvent(ev StreamEvent) {
+	a.streamMu.Lock()
+	defer a.streamMu.Unlock()
+	if a.streamEventsSize >= a.maxStreamBuffer {
+		return // buffer full, skip
+	}
+	data, err := json.Marshal(ev)
+	if err == nil {
+		a.streamEventsSize += len(data)
+		if a.streamEventsSize <= a.maxStreamBuffer {
+			a.streamEvents = append(a.streamEvents, ev)
+		}
+	}
+}
+
+// StreamBuffer returns the buffered stream events for trace capture.
+func (a *OpenAIAdapter) StreamBuffer() []StreamEvent {
+	a.streamMu.Lock()
+	defer a.streamMu.Unlock()
+	return a.streamEvents
+}
+
 // streamLoop is the goroutine body for FromCoreStream.
 func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequest, events <-chan format.CoreStreamEvent, out chan<- StreamEvent) {
 	defer close(out)
+
+	// send buffers the event for trace capture before writing to the output channel.
+	send := func(ev StreamEvent) {
+		a.bufferStreamEvent(ev)
+		out <- ev
+	}
 
 	seqNum := int64(0)
 	next := func() int64 {
@@ -316,28 +356,28 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 			}
 			response.Status = "in_progress"
 
-			out <- StreamEvent{
+			send(StreamEvent{
 				Event: "response.created",
 				Data: ResponseLifecycleEvent{
 					Type:           "response.created",
 					SequenceNumber: next(),
 					Response:       cloneResponse(response),
 				},
-			}
+			})
 
 		// ==================================================================
 		// Lifecycle: in_progress
 		// ==================================================================
 		case format.CoreEventInProgress:
 			response.Status = "in_progress"
-			out <- StreamEvent{
+			send(StreamEvent{
 				Event: "response.in_progress",
 				Data: ResponseLifecycleEvent{
 					Type:           "response.in_progress",
 					SequenceNumber: next(),
 					Response:       cloneResponse(response),
 				},
-			}
+			})
 
 		// ==================================================================
 		// Content block started
@@ -370,7 +410,7 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 				}
 				outputIndexes[index] = len(response.Output)
 				response.Output = append(response.Output, item)
-				out <- StreamEvent{
+				send(StreamEvent{
 					Event: "response.output_item.added",
 					Data: OutputItemEvent{
 						Type:           "response.output_item.added",
@@ -378,7 +418,7 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 						OutputIndex:    outputIndexes[index],
 						Item:           item,
 					},
-				}
+				})
 			}
 
 		// ==================================================================
@@ -404,7 +444,7 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 				}
 				outputIndexes[index] = len(response.Output)
 				response.Output = append(response.Output, item)
-				out <- StreamEvent{
+				send(StreamEvent{
 					Event: "response.output_item.added",
 					Data: OutputItemEvent{
 						Type:           "response.output_item.added",
@@ -412,8 +452,8 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 						OutputIndex:    outputIndexes[index],
 						Item:           item,
 					},
-				}
-				out <- StreamEvent{
+				})
+				send(StreamEvent{
 					Event: "response.content_part.added",
 					Data: ContentPartEvent{
 						Type:           "response.content_part.added",
@@ -423,10 +463,10 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 						ContentIndex:   0,
 						Part:           ContentPart{Type: "output_text"},
 					},
-				}
+				})
 			}
 
-			out <- StreamEvent{
+			send(StreamEvent{
 				Event: "response.output_text.delta",
 				Data: OutputTextDeltaEvent{
 					Type:           "response.output_text.delta",
@@ -436,7 +476,7 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 					ContentIndex:   0,
 					Delta:          event.Delta,
 				},
-			}
+			})
 
 		// ==================================================================
 		// Text done
@@ -446,7 +486,7 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 			text := contentText[index]
 			delete(contentText, index)
 
-			out <- StreamEvent{
+			send(StreamEvent{
 				Event: "response.output_text.done",
 				Data: OutputTextDoneEvent{
 					Type:           "response.output_text.done",
@@ -456,13 +496,13 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 					ContentIndex:   0,
 					Text:           text,
 				},
-			}
+			})
 
 			// Mark item as completed.
 			if idx, ok := outputIndexes[index]; ok && idx < len(response.Output) {
 				response.Output[idx].Status = "completed"
 			}
-			out <- StreamEvent{
+			send(StreamEvent{
 				Event: "response.output_item.done",
 				Data: OutputItemEvent{
 					Type:           "response.output_item.done",
@@ -470,7 +510,7 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 					OutputIndex:    outputIndexes[index],
 					Item:           response.Output[outputIndexes[index]],
 				},
-			}
+			})
 
 		// ==================================================================
 		// Tool call arguments delta
@@ -478,7 +518,7 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 		case format.CoreToolCallArgsDelta:
 			index := event.Index
 			toolCallArgs[index] += event.Delta
-			out <- StreamEvent{
+			send(StreamEvent{
 				Event: "response.function_call_arguments.delta",
 				Data: FunctionCallArgumentsDeltaEvent{
 					Type:           "response.function_call_arguments.delta",
@@ -487,7 +527,7 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 					OutputIndex:    outputIndexes[index],
 					Delta:          event.Delta,
 				},
-			}
+			})
 
 		// ==================================================================
 		// Tool call arguments done
@@ -498,7 +538,7 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 				response.Output[idx].Arguments = event.Delta
 				response.Output[idx].Status = "completed"
 			}
-			out <- StreamEvent{
+			send(StreamEvent{
 				Event: "response.function_call_arguments.done",
 				Data: FunctionCallArgumentsDoneEvent{
 					Type:           "response.function_call_arguments.done",
@@ -507,8 +547,8 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 					OutputIndex:    outputIndexes[index],
 					Arguments:      event.Delta,
 				},
-			}
-			out <- StreamEvent{
+			})
+			send(StreamEvent{
 				Event: "response.output_item.done",
 				Data: OutputItemEvent{
 					Type:           "response.output_item.done",
@@ -516,7 +556,7 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 					OutputIndex:    outputIndexes[index],
 					Item:           response.Output[outputIndexes[index]],
 				},
-			}
+			})
 
 		// ==================================================================
 		// Lifecycle: completed
@@ -533,28 +573,28 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 					},
 				}
 			}
-			out <- StreamEvent{
+			send(StreamEvent{
 				Event: "response.completed",
 				Data: ResponseLifecycleEvent{
 					Type:           "response.completed",
 					SequenceNumber: next(),
 					Response:       cloneResponse(response),
 				},
-			}
+			})
 
 		// ==================================================================
 		// Lifecycle: incomplete
 		// ==================================================================
 		case format.CoreEventIncomplete:
 			response.Status = "incomplete"
-			out <- StreamEvent{
+			send(StreamEvent{
 				Event: "response.incomplete",
 				Data: ResponseLifecycleEvent{
 					Type:           "response.incomplete",
 					SequenceNumber: next(),
 					Response:       cloneResponse(response),
 				},
-			}
+			})
 
 		// ==================================================================
 		// Lifecycle: failed
@@ -568,14 +608,14 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 					Code:    event.Error.Code,
 				}
 			}
-			out <- StreamEvent{
+			send(StreamEvent{
 				Event: "response.failed",
 				Data: ResponseLifecycleEvent{
 					Type:           "response.failed",
 					SequenceNumber: next(),
 					Response:       cloneResponse(response),
 				},
-			}
+			})
 
 		// ==================================================================
 		// Content block done
@@ -589,7 +629,7 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 				outputIndex := outputIndexes[index]
 
 				// output_text.done
-				out <- StreamEvent{
+				send(StreamEvent{
 					Event: "response.output_text.done",
 					Data: OutputTextDoneEvent{
 						Type:           "response.output_text.done",
@@ -599,10 +639,10 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 						ContentIndex:   0,
 						Text:           text,
 					},
-				}
+				})
 
 				// content_part.done
-				out <- StreamEvent{
+				send(StreamEvent{
 					Event: "response.content_part.done",
 					Data: ContentPartEvent{
 						Type:           "response.content_part.done",
@@ -612,7 +652,7 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 						ContentIndex:   0,
 						Part:           ContentPart{Type: "output_text"},
 					},
-				}
+				})
 
 				// Mark item as completed.
 				if idx, ok := outputIndexes[index]; ok && idx < len(response.Output) {
@@ -620,7 +660,7 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 				}
 
 				// output_item.done
-				out <- StreamEvent{
+				send(StreamEvent{
 					Event: "response.output_item.done",
 					Data: OutputItemEvent{
 						Type:           "response.output_item.done",
@@ -628,7 +668,7 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 						OutputIndex:    outputIndex,
 						Item:           response.Output[outputIndexes[index]],
 					},
-				}
+				})
 
 				// Clean up state.
 				delete(contentText, index)
@@ -648,7 +688,7 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 				}
 
 				// function_call_arguments.done
-				out <- StreamEvent{
+				send(StreamEvent{
 					Event: "response.function_call_arguments.done",
 					Data: FunctionCallArgumentsDoneEvent{
 						Type:           "response.function_call_arguments.done",
@@ -657,10 +697,10 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 						OutputIndex:    outputIndex,
 						Arguments:      finalArgs,
 					},
-				}
+				})
 
 				// output_item.done
-				out <- StreamEvent{
+				send(StreamEvent{
 					Event: "response.output_item.done",
 					Data: OutputItemEvent{
 						Type:           "response.output_item.done",
@@ -668,7 +708,7 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 						OutputIndex:    outputIndex,
 						Item:           response.Output[outputIndexes[index]],
 					},
-				}
+				})
 
 				// Clean up state.
 				delete(toolCallArgs, index)
@@ -685,10 +725,10 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 		// Ping
 		// ==================================================================
 		case format.CorePing:
-			out <- StreamEvent{
+			send(StreamEvent{
 				Event: "ping",
 				Data:  nil,
-			}
+			})
 		}
 	}
 

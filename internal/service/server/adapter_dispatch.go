@@ -518,6 +518,26 @@ func (s *Server) handleAdapterStream(
 	}
 
 	// Record usage statistics after stream completes.
+
+	// Capture stream events for trace.
+	if s.tracer != nil && s.tracer.Enabled() {
+		// OpenAI stream events from client adapter
+		if oaiClient, ok := s.adapterRegistry.GetClient(config.ProtocolOpenAIResponse); ok {
+			if oaiAdapter, ok := oaiClient.(*openai.OpenAIAdapter); ok {
+				if events := oaiAdapter.StreamBuffer(); len(events) > 0 {
+					streamRecord.OpenAIStreamEvents = events
+				}
+			}
+		}
+		// Anthropic stream events from provider adapter
+		if anthProvider, ok := s.adapterRegistry.GetProvider(config.ProtocolAnthropic); ok {
+			if anthAdapter, ok := anthProvider.(*anthropic.AnthropicProviderAdapter); ok {
+				if events := anthAdapter.StreamBuffer(); len(events) > 0 {
+					streamRecord.AnthropicStreamEvents = events
+				}
+			}
+		}
+	}
 	if s.stats != nil && (finalUsage.InputTokens > 0 || finalUsage.OutputTokens > 0) {
 		s.stats.Record(openAIReq.Model, candidate.UpstreamModel, stats.Usage{
 			InputTokens:              finalUsage.InputTokens,
