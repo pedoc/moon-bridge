@@ -9,9 +9,9 @@ import (
 
 	"moonbridge/internal/extension/plugin"
 	"moonbridge/internal/foundation/config"
-	"moonbridge/internal/protocol/openai"
 	"moonbridge/internal/protocol/anthropic"
 	"moonbridge/internal/protocol/format"
+	"moonbridge/internal/protocol/openai"
 )
 
 const (
@@ -264,6 +264,7 @@ func (p *DSPlugin) FilterCoreContent(ctx context.Context, block *format.CoreCont
 	}
 	return false
 }
+
 // --- ContentRememberer ---
 
 func (p *DSPlugin) RememberContent(ctx *plugin.RequestContext, content []anthropic.ContentBlock) {
@@ -335,6 +336,11 @@ func (p *DSPlugin) OnStreamEvent(ctx *plugin.StreamContext, event plugin.StreamE
 		if ss.Start(event.Index, event.Block) {
 			return true, nil
 		}
+		// Track tool_use block IDs so they can be matched to thinking blocks
+		// during RememberStreamResult.
+		if event.Block != nil && event.Block.Type == "tool_use" && event.Block.ID != "" {
+			ss.RecordToolCall(event.Block.ID)
+		}
 	case "block_delta":
 		if ss.Delta(event.Index, event.Delta) {
 			return true, nil
@@ -398,6 +404,17 @@ func (p *DSPlugin) MutateCoreRequest(ctx context.Context, req *format.CoreReques
 func (p *DSPlugin) ExtractThinkingBlock(_ *plugin.RequestContext, summary []openai.ReasoningItemSummary) (anthropic.ContentBlock, bool) {
 	for _, item := range summary {
 		if item.Type != "summary_text" {
+			// Try adapter-created "text" type items with optional Signature field.
+			if item.Type == "text" {
+				block := anthropic.ContentBlock{
+					Type:      "thinking",
+					Thinking:  item.Text,
+					Signature: item.Signature,
+				}
+				if block.Thinking != "" || block.Signature != "" {
+					return block, true
+				}
+			}
 			continue
 		}
 		if block, ok := DecodeThinkingSummary(item.Text); ok {

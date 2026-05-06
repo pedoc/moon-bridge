@@ -122,7 +122,7 @@ func (state *State) RememberStreamResult(stream *StreamState, outputText string)
 }
 
 func (state *State) PrependCachedForToolUse(messages *[]anthropic.Message, toolCallID string) {
-	block, ok := state.cachedForToolCall(toolCallID)
+	block, ok := state.CachedForToolCall(toolCallID)
 	if !ok {
 		return
 	}
@@ -225,7 +225,7 @@ func (stream *StreamState) RecordToolCall(toolCallID string) {
 	stream.toolCallIDs = append(stream.toolCallIDs, toolCallID)
 }
 
-func (state *State) cachedForToolCall(toolCallID string) (anthropic.ContentBlock, bool) {
+func (state *State) CachedForToolCall(toolCallID string) (anthropic.ContentBlock, bool) {
 	if state == nil || toolCallID == "" {
 		return anthropic.ContentBlock{}, false
 	}

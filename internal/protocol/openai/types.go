@@ -233,8 +233,11 @@ type CustomToolCallInputDeltaEvent struct {
 
 // ReasoningItemSummary provides a summary of reasoning content.
 type ReasoningItemSummary struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
+	// Signature is the provider-specific reasoning signature (e.g. DeepSeek thinking signature)
+	// required for continuing thinking chains across conversation turns.
+	Type      string `json:"type"`
+	Text      string `json:"text"`
+	Signature string `json:"signature,omitempty"`
 }
 
 // ============================================================================

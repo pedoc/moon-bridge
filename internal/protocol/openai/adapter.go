@@ -34,15 +34,15 @@ type OpenAIAdapter struct {
 	cfg   config.Config
 	hooks format.CorePluginHooks
 
-	streamMu         sync.Mutex
-	streamEvents     []StreamEvent
+	streamMu     sync.Mutex
+	streamEvents []StreamEvent
 }
 
 // NewOpenAIAdapter creates a new OpenAIAdapter with the given config and hooks.
 func NewOpenAIAdapter(cfg config.Config, hooks format.CorePluginHooks) *OpenAIAdapter {
 	return &OpenAIAdapter{
-		cfg:      cfg,
-		hooks:    hooks.WithDefaults(),
+		cfg:   cfg,
+		hooks: hooks.WithDefaults(),
 	}
 }
 
@@ -186,7 +186,7 @@ func (a *OpenAIAdapter) FromCoreResponse(ctx context.Context, resp *format.CoreR
 					Type:   "reasoning",
 					Status: "completed",
 					Summary: []ReasoningItemSummary{
-						{Type: "text", Text: block.ReasoningText},
+						{Type: "text", Text: block.ReasoningText, Signature: block.ReasoningSignature},
 					},
 				})
 
@@ -391,9 +391,9 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 				io := len(response.Output)
 				outputIndexes[index] = io
 				response.Output = append(response.Output, OutputItem{
-					Type:   "reasoning",
-					ID:     id,
-					Status: "in_progress",
+					Type:    "reasoning",
+					ID:      id,
+					Status:  "in_progress",
 					Summary: []ReasoningItemSummary{},
 				})
 				send(StreamEvent{
@@ -661,14 +661,18 @@ func (a *OpenAIAdapter) streamLoop(ctx context.Context, coreReq *format.CoreRequ
 		case format.CoreContentBlockDone:
 			index := event.Index
 
-
 			// Reasoning block done — emit reasoning summary part done.
 			if reasonIndexes[index] {
 				if idx, ok := outputIndexes[index]; ok && idx < len(response.Output) {
 					response.Output[idx].Status = "completed"
+					sig := ""
+					if event.ContentBlock != nil {
+						sig = event.ContentBlock.ReasoningSignature
+					}
 					response.Output[idx].Summary = []ReasoningItemSummary{{
-						Type: "text",
-						Text: contentText[index],
+						Type:      "text",
+						Text:      contentText[index],
+						Signature: sig,
 					}}
 				}
 				send(StreamEvent{
@@ -807,6 +811,7 @@ type inputItem struct {
 	Type      string          `json:"type"`
 	Role      string          `json:"role"`
 	Content   json.RawMessage `json:"content"`
+	Summary   json.RawMessage `json:"summary"`
 	CallID    string          `json:"call_id"`
 	Name      string          `json:"name"`
 	Arguments string          `json:"arguments"`
@@ -862,9 +867,18 @@ func convertInput(raw json.RawMessage) ([]format.CoreMessage, []format.CoreConte
 	messages := make([]format.CoreMessage, 0, len(items))
 	system := make([]format.CoreContentBlock, 0)
 	var pendingToolResults []format.CoreContentBlock
+	var pendingReasoning []format.CoreContentBlock
 
 	for _, item := range items {
 		if item.Type == "function_call_output" {
+			// Flush pending reasoning before tool results.
+			if len(pendingReasoning) > 0 {
+				messages = append(messages, format.CoreMessage{
+					Role:    "assistant",
+					Content: pendingReasoning,
+				})
+				pendingReasoning = pendingReasoning[:0]
+			}
 			// Tool result: collect and flush as user message.
 			pendingToolResults = append(pendingToolResults, format.CoreContentBlock{
 				Type:      "tool_result",
@@ -890,23 +904,35 @@ func convertInput(raw json.RawMessage) ([]format.CoreMessage, []format.CoreConte
 			role = "user"
 		}
 
+		// Handle reasoning input items — convert to thinking blocks for the next assistant message.
+		if item.Type == "reasoning" {
+			blocks := reasoningBlocksFromSummary(item.Summary)
+			pendingReasoning = append(pendingReasoning, blocks...)
+			continue
+		}
+
 		switch {
 		case item.Type == "function_call":
 			// function_call in input → tool_use assistant block.
+			var fcBlocks []format.CoreContentBlock
+			// Prepend any pending reasoning blocks.
+			if len(pendingReasoning) > 0 {
+				fcBlocks = append(fcBlocks, pendingReasoning...)
+				pendingReasoning = pendingReasoning[:0]
+			}
 			toolInput := json.RawMessage(item.Arguments)
 			if !json.Valid([]byte(item.Arguments)) {
 				toolInput = json.RawMessage(`{}`)
 			}
+			fcBlocks = append(fcBlocks, format.CoreContentBlock{
+				Type:      "tool_use",
+				ToolUseID: firstNonEmpty(item.CallID, item.ID),
+				ToolName:  item.Name,
+				ToolInput: toolInput,
+			})
 			messages = append(messages, format.CoreMessage{
-				Role: "assistant",
-				Content: []format.CoreContentBlock{
-					{
-						Type:      "tool_use",
-						ToolUseID: firstNonEmpty(item.CallID, item.ID),
-						ToolName:  item.Name,
-						ToolInput: toolInput,
-					},
-				},
+				Role:    "assistant",
+				Content: fcBlocks,
 			})
 
 		case role == "system" || role == "developer":
@@ -917,6 +943,12 @@ func convertInput(raw json.RawMessage) ([]format.CoreMessage, []format.CoreConte
 
 		case role == "assistant":
 			blocks := contentBlocksFromRaw(item.Content)
+			// Prepend any pending reasoning blocks (from previous reasoning input items)
+			// before the assistant message content.
+			if len(pendingReasoning) > 0 {
+				blocks = append(pendingReasoning, blocks...)
+				pendingReasoning = pendingReasoning[:0]
+			}
 			if len(blocks) > 0 {
 				messages = append(messages, format.CoreMessage{
 					Role:    "assistant",
@@ -940,6 +972,14 @@ func convertInput(raw json.RawMessage) ([]format.CoreMessage, []format.CoreConte
 		messages = append(messages, format.CoreMessage{
 			Role:    "user",
 			Content: copyContentBlocks(pendingToolResults),
+		})
+	}
+
+	// Flush remaining reasoning blocks (no following assistant message).
+	if len(pendingReasoning) > 0 {
+		messages = append(messages, format.CoreMessage{
+			Role:    "assistant",
+			Content: pendingReasoning,
 		})
 	}
 
@@ -1190,6 +1230,41 @@ func copyContentBlocks(blocks []format.CoreContentBlock) []format.CoreContentBlo
 	out := make([]format.CoreContentBlock, len(blocks))
 	copy(out, blocks)
 	return out
+}
+
+// reasoningSummaryItem is a lightweight struct for unmarshalling reasoning summary JSON.
+type reasoningSummaryItem struct {
+	Type      string `json:"type"`
+	Text      string `json:"text"`
+	Signature string `json:"signature,omitempty"`
+}
+
+// reasoningBlocksFromSummary parses a reasoning summary JSON array and converts
+// each item to a CoreContentBlock of type "reasoning".
+// This preserves the thinking text and optional signature for upstream replay.
+func reasoningBlocksFromSummary(raw json.RawMessage) []format.CoreContentBlock {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var items []reasoningSummaryItem
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil
+	}
+	blocks := make([]format.CoreContentBlock, 0, len(items))
+	for _, item := range items {
+		if item.Text == "" {
+			continue
+		}
+		blocks = append(blocks, format.CoreContentBlock{
+			Type:          "reasoning",
+			ReasoningText: item.Text,
+			// Use Signature from the item if present (adapter-created "text" type).
+			// This preserves the provider-specific thinking signature needed for
+			// continuing reasoning chains across conversation turns.
+			ReasoningSignature: item.Signature,
+		})
+	}
+	return blocks
 }
 
 // cloneResponse creates a shallow copy of a Response for use in stream events.

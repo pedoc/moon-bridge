@@ -48,7 +48,14 @@ func (server *Server) sessionForRequest(request *http.Request) *session.Session 
 	key := sessionKeyFromRequest(request)
 	if key == "" {
 		sess := session.New()
-		sess.InitExtensions(nil)
+		// Without a stable session key, we intentionally isolate state per request.
+		// Still, plugins expect ExtensionData to be initialized (even for single-request sessions),
+		// so that per-session caches (e.g. DeepSeek thinking replay) can function when a key is provided.
+		if server.pluginRegistry != nil {
+			sess.InitExtensions(server.pluginRegistry.NewSessionData())
+		} else {
+			sess.InitExtensions(nil)
+		}
 		return sess
 	}
 
@@ -60,6 +67,11 @@ func (server *Server) sessionForRequest(request *http.Request) *session.Session 
 	if entry, ok := server.sessions[key]; ok {
 		entry.lastUsed = now
 		server.sessions[key] = entry
+		// Backfill ExtensionData if the session was created before plugins were initialized
+		// or before session extension initialization was wired up.
+		if entry.sess != nil && entry.sess.ExtensionData == nil && server.pluginRegistry != nil {
+			entry.sess.InitExtensions(server.pluginRegistry.NewSessionData())
+		}
 		return entry.sess
 	}
 
@@ -70,7 +82,11 @@ func (server *Server) sessionForRequest(request *http.Request) *session.Session 
 	}
 
 	sess := session.NewWithID(key)
-	sess.InitExtensions(nil)
+	if server.pluginRegistry != nil {
+		sess.InitExtensions(server.pluginRegistry.NewSessionData())
+	} else {
+		sess.InitExtensions(nil)
+	}
 	server.sessions[key] = serverSession{sess: sess, lastUsed: now}
 	return sess
 }

@@ -8,13 +8,16 @@ import (
 	"net/http"
 	"time"
 
+	deepseekv4 "moonbridge/internal/extension/deepseek_v4"
+	"moonbridge/internal/extension/plugin"
 	"moonbridge/internal/foundation/config"
-	openai "moonbridge/internal/protocol/openai"
+	"moonbridge/internal/foundation/session"
 	"moonbridge/internal/protocol/anthropic"
 	"moonbridge/internal/protocol/cache"
 	"moonbridge/internal/protocol/format"
-	"moonbridge/internal/service/stats"
+	openai "moonbridge/internal/protocol/openai"
 	"moonbridge/internal/service/provider"
+	"moonbridge/internal/service/stats"
 	mbtrace "moonbridge/internal/service/trace"
 )
 
@@ -210,6 +213,14 @@ func (s *Server) handleWithAdapters(
 		injectAnthropicWebSearch(upstreamReq)
 	}
 
+	// Prepend cached reasoning blocks for DeepSeek thinking chain replay.
+	// This restores thinking blocks before assistant messages with tool_use
+	// from previous turns, which DeepSeek requires for continuing the thinking
+	// chain across conversation turns.
+	if s.pluginRegistry != nil && sess != nil {
+		prependCachedThinking(upstreamReq, sess)
+	}
+
 	// ------------------------------------------------------------------
 	// 4b. If streaming, use streaming path.
 	// ------------------------------------------------------------------
@@ -258,6 +269,17 @@ func (s *Server) handleWithAdapters(
 	// 6. Convert upstream response → CoreResponse.
 	// ------------------------------------------------------------------
 	coreResp, err := providerAdapter.ToCoreResponse(ctx, &upstreamResp)
+
+	// Remember response content for plugin state tracking (DeepSeek thinking replay).
+	if s.pluginRegistry != nil && len(upstreamResp.Content) > 0 {
+		s.pluginRegistry.RememberContent(
+			&plugin.RequestContext{
+				ModelAlias:  openAIReq.Model,
+				SessionData: sess.ExtensionData,
+			},
+			upstreamResp.Content,
+		)
+	}
 	if err != nil {
 		log.Error("adapter path: ToCoreResponse failed", "error", err)
 		payload := openai.ErrorResponse{
@@ -536,6 +558,43 @@ func (s *Server) handleAdapterStream(
 				if events := anthAdapter.StreamBuffer(); len(events) > 0 {
 					streamRecord.AnthropicStreamEvents = events
 				}
+
+				// Remember reasoning content for DeepSeek thinking replay via StreamInterceptor.
+				if anthProvider2, ok := s.adapterRegistry.GetProvider(config.ProtocolAnthropic); ok {
+					if anthAdapter2, ok := anthProvider2.(*anthropic.AnthropicProviderAdapter); ok {
+						if s.pluginRegistry != nil && sess != nil {
+							events := anthAdapter2.StreamBuffer()
+							if len(events) > 0 {
+								states := s.pluginRegistry.NewStreamStates(openAIReq.Model)
+								for _, ev := range events {
+									pluginType := ""
+									switch {
+									case ev.Type == "content_block_start":
+										pluginType = "block_start"
+									case ev.Type == "content_block_delta":
+										pluginType = "block_delta"
+									case ev.Type == "content_block_stop":
+										pluginType = "block_stop"
+									}
+									if pluginType == "" {
+										continue
+									}
+									s.pluginRegistry.OnStreamEvent(openAIReq.Model, plugin.StreamEvent{
+										Type:  pluginType,
+										Index: ev.Index,
+										Block: ev.ContentBlock,
+										Delta: ev.Delta,
+									}, states)
+								}
+								outputText := ""
+								if finalResp != nil {
+									outputText = finalResp.OutputText
+								}
+								s.pluginRegistry.OnStreamComplete(openAIReq.Model, states, outputText, sess.ExtensionData)
+							}
+						}
+					}
+				}
 			}
 		}
 	}
@@ -680,3 +739,72 @@ func injectAnthropicWebSearch(req *anthropic.MessageRequest) {
 		MaxUses: maxUses,
 	})
 }
+
+// prependCachedThinking restores thinking blocks before assistant messages
+// for DeepSeek thinking chain replay across conversation turns.
+// It looks up cached thinking blocks from the session state and prepends them
+// before tool_use and text assistant messages in the upstream request.
+//
+// Important: unlike PrependThinkingBlockForToolUse (which always targets the
+// LAST message), this function targets the SPECIFIC assistant message that
+// contains the tool_use, because in follow-up requests the last message
+// is typically a user tool_result.
+func prependCachedThinking(upstreamReq *anthropic.MessageRequest, sess *session.Session) {
+	stateRaw, ok := sess.ExtensionData["deepseek_v4"]
+	if !ok {
+		return
+	}
+	state, ok := stateRaw.(*deepseekv4.State)
+	if !ok {
+		return
+	}
+
+	// For each assistant message, prepend cached thinking from the previous turn.
+	for i := range upstreamReq.Messages {
+		msg := &upstreamReq.Messages[i]
+		if msg.Role != "assistant" || len(msg.Content) == 0 {
+			continue
+		}
+		// Check if the message already has a thinking block.
+		if hasThinkingBlock(msg.Content) {
+			continue
+		}
+		// Try to prepend cached thinking by tool call ID (for tool_use messages).
+		for _, block := range msg.Content {
+			if block.Type == "tool_use" && block.ID != "" {
+				if cached, ok := state.CachedForToolCall(block.ID); ok {
+					// Prepend thinking block directly to this message, not to the last message.
+					msg.Content = append([]anthropic.ContentBlock{normalizeThinkingBlock(cached)}, msg.Content...)
+				}
+				break
+			}
+		}
+		// Fallback: try text-based caching (for text-only assistant messages).
+		if !hasThinkingBlock(msg.Content) {
+			prepended := state.PrependCachedForAssistantText(msg.Content)
+			if len(prepended) > len(msg.Content) {
+				msg.Content = prepended
+			}
+		}
+	}
+}
+
+// normalizeThinkingBlock ensures a thinking block has the correct Type field.
+func normalizeThinkingBlock(block anthropic.ContentBlock) anthropic.ContentBlock {
+	return anthropic.ContentBlock{
+		Type:      "thinking",
+		Thinking:  block.Thinking,
+		Signature: block.Signature,
+	}
+}
+
+// hasThinkingBlock checks if anthropic message content contains a thinking block.
+func hasThinkingBlock(content []anthropic.ContentBlock) bool {
+	for _, block := range content {
+		if block.Type == "thinking" {
+			return true
+		}
+	}
+	return false
+}
+

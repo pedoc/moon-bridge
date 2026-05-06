@@ -176,6 +176,8 @@ func (a *AnthropicProviderAdapter) ToCoreResponse(ctx context.Context, resp any)
 		Usage:      a.toCoreUsage(msgResp.Usage),
 		StopReason: msgResp.StopReason,
 	}
+	a.hooks.RememberContent(ctx, coreContent)
+	a.hooks.RememberContent(ctx, coreContent)
 
 	// Map error-like stop reasons.
 	if msgResp.StopReason == "content_filtered" {
@@ -709,6 +711,14 @@ func (a *AnthropicProviderAdapter) StreamBuffer() []StreamEvent {
 	return a.streamEvents
 }
 
+
+// RememberStreamContent stores response content from a stream for plugin state tracking.
+func (a *AnthropicProviderAdapter) RememberStreamContent(ctx context.Context, blocks []format.CoreContentBlock) {
+	if len(blocks) == 0 {
+		return
+	}
+	a.hooks.RememberContent(ctx, blocks)
+}
 // cleanSchema recursively removes nil values from a JSON schema map.
 // DeepSeek rejects null values in schema properties.
 // Returns a default schema {"type":"object"} when no keys remain.
