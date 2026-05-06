@@ -119,6 +119,7 @@ func (p *Plugin) OnRequestCompleted(_ *plugin.RequestContext, result plugin.Requ
 		Timestamp:               time.Now(),
 		Model:                   result.Model,
 		ActualModel:             result.ActualModel,
+		ProviderKey:             result.ProviderKey,
 		InputTokens:             int64(result.InputTokens),
 		OutputTokens:            int64(result.OutputTokens),
 		CacheCreation:           int64(result.CacheCreation),

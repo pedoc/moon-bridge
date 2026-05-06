@@ -129,6 +129,7 @@ type ReasoningExtractor interface {
 type RequestResult struct {
 	Model         string
 	ActualModel   string
+	ProviderKey   string
 	InputTokens   int
 	OutputTokens  int
 	CacheCreation int

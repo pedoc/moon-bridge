@@ -352,7 +352,7 @@ func (s *Server) handleWithAdapters(
 				CacheReadInputTokens:     coreResp.Usage.CachedInputTokens,
 			}, false)
 		}
-		s.onRequestCompleted(openAIReq.Model, preferred.UpstreamModel, requestStart, usage, 0, "success", "")
+		s.onRequestCompleted(openAIReq.Model, preferred.UpstreamModel, preferred.ProviderKey, requestStart, usage, 0, "success", "")
 
 		// Record usage statistics.
 		if s.stats != nil {
@@ -631,7 +631,7 @@ func (s *Server) handleAdapterStream(
 				CacheReadInputTokens:     finalUsage.InputTokensDetails.CachedTokens,
 			}, false)
 		}
-		s.onRequestCompleted(openAIReq.Model, candidate.UpstreamModel, requestStart, usage, 0, "success", "")
+		s.onRequestCompleted(openAIReq.Model, candidate.UpstreamModel, candidate.ProviderKey, requestStart, usage, 0, "success", "")
 	}
 }
 

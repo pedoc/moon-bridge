@@ -20,7 +20,7 @@ import (
 	mbtrace "moonbridge/internal/service/trace"
 )
 
-func (server *Server) onRequestCompleted(model, actualModel string, startTime time.Time, usage plugin.RequestUsage, cost float64, status, errMsg string) {
+func (server *Server) onRequestCompleted(model, actualModel, providerKey string, startTime time.Time, usage plugin.RequestUsage, cost float64, status, errMsg string) {
 	if server.pluginRegistry == nil {
 		return
 	}
@@ -33,6 +33,7 @@ func (server *Server) onRequestCompleted(model, actualModel string, startTime ti
 		plugin.RequestResult{
 			Model:         model,
 			ActualModel:   actualModel,
+			ProviderKey:   providerKey,
 			InputTokens:   inputTokens,
 			OutputTokens:  outputTokens,
 			CacheCreation: cacheCreation,
@@ -167,7 +168,7 @@ func (server *Server) handleResponses(writer http.ResponseWriter, request *http.
 	server.writeTrace(record)
 	writeOpenAIError(writer, http.StatusInternalServerError, payload)
 	server.onRequestCompleted(
-		responsesRequest.Model, "", requestStart,
+		responsesRequest.Model, "", "", requestStart,
 		zeroUsage("anthropic", "none"), 0, "error", "no adapter path",
 	)
 }
@@ -246,7 +247,7 @@ func (server *Server) handleOpenAIResponse(writer http.ResponseWriter, request *
 	defer func() {
 		if hookErr != "" {
 			server.onRequestCompleted(
-				responsesRequest.Model, "", proxyStart,
+				responsesRequest.Model, "", "", proxyStart,
 				zeroUsage(config.ProtocolOpenAIResponse, "none"), 0, "error", hookErr,
 			)
 		}
@@ -490,7 +491,7 @@ func (server *Server) handleOpenAIResponse(writer http.ResponseWriter, request *
 			cost = computeCostWithProviderPricing(server.providerMgr, server.stats, responsesRequest.Model, actualModel, providerKey, billingUsage)
 		}
 		server.onRequestCompleted(
-			responsesRequest.Model, actualModel, proxyStart,
+			responsesRequest.Model, actualModel, providerKey, proxyStart,
 			metricTelemetry,
 			cost, status, errMsg,
 		)

@@ -120,6 +120,7 @@ func TestOnRequestCompletedRecordsRawTelemetry(t *testing.T) {
 	p.OnRequestCompleted(nil, plugin.RequestResult{
 		Model:         "kimi",
 		ActualModel:   "kimi-for-coding",
+		ProviderKey:   "deepseek",
 		InputTokens:   85822,
 		OutputTokens:  145,
 		CacheRead:     85248,
@@ -149,7 +150,7 @@ func TestOnRequestCompletedRecordsRawTelemetry(t *testing.T) {
 		t.Fatalf("records len = %d", len(records))
 	}
 	got := records[0]
-	if got.UsageSource != "anthropic_stream" || got.RawCacheRead != 85248 || got.NormalizedInputTokens != 85822 {
+	if got.UsageSource != "anthropic_stream" || got.RawCacheRead != 85248 || got.NormalizedInputTokens != 85822 || got.ProviderKey != "deepseek" {
 		t.Fatalf("record = %+v", got)
 	}
 }
