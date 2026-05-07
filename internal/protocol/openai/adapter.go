@@ -912,17 +912,21 @@ func convertInput(raw json.RawMessage) ([]format.CoreMessage, []format.CoreConte
 		if item.Type == "function_call_output" {
 			// Flush pending function_calls before tool results.
 			if len(pendingFCBlocks) > 0 {
+				flushed := make([]format.CoreContentBlock, len(pendingFCBlocks))
+				copy(flushed, pendingFCBlocks)
 				messages = append(messages, format.CoreMessage{
 					Role:    "assistant",
-					Content: pendingFCBlocks,
+					Content: flushed,
 				})
 				pendingFCBlocks = pendingFCBlocks[:0]
 			}
 			// Flush pending reasoning before tool results.
 			if len(pendingReasoning) > 0 {
+				flushedReasoning := make([]format.CoreContentBlock, len(pendingReasoning))
+				copy(flushedReasoning, pendingReasoning)
 				messages = append(messages, format.CoreMessage{
 					Role:    "assistant",
-					Content: pendingReasoning,
+					Content: flushedReasoning,
 				})
 				pendingReasoning = pendingReasoning[:0]
 			}
@@ -940,10 +944,14 @@ func convertInput(raw json.RawMessage) ([]format.CoreMessage, []format.CoreConte
 			continue
 		}
 		// Flush pending function_calls before non-function-call items.
-		if len(pendingFCBlocks) > 0 {
+		// Don't flush between consecutive function_call items — they should
+		// be batched into a single assistant message.
+		if item.Type != "function_call" && len(pendingFCBlocks) > 0 {
+			flushed := make([]format.CoreContentBlock, len(pendingFCBlocks))
+			copy(flushed, pendingFCBlocks)
 			messages = append(messages, format.CoreMessage{
 				Role:    "assistant",
-				Content: pendingFCBlocks,
+				Content: flushed,
 			})
 			pendingFCBlocks = pendingFCBlocks[:0]
 		}
@@ -1021,9 +1029,11 @@ func convertInput(raw json.RawMessage) ([]format.CoreMessage, []format.CoreConte
 
 	// Flush any remaining batched function_calls.
 	if len(pendingFCBlocks) > 0 {
+		flushed := make([]format.CoreContentBlock, len(pendingFCBlocks))
+		copy(flushed, pendingFCBlocks)
 		messages = append(messages, format.CoreMessage{
 			Role:    "assistant",
-			Content: pendingFCBlocks,
+			Content: flushed,
 		})
 	}
 

@@ -278,6 +278,11 @@ func (s *Server) handleWithAdapters(
 			return
 		}
 
+		// Prepend cached reasoning for DeepSeek thinking chain replay.
+		if s.pluginRegistry != nil && sess != nil {
+			prependCachedReasoningForChat(chatReq, sess)
+		}
+
 		if openAIReq.Stream {
 			s.handleAdapterStream(w, r, ctx, openAIReq, coreReq, chatReq, preferred)
 			record.OpenAIRequest = nil
@@ -339,6 +344,20 @@ func (s *Server) handleWithAdapters(
 			record.OpenAIResponse = payload
 			writeOpenAIError(w, http.StatusInternalServerError, payload)
 			return
+		}
+
+		// Cache reasoning from Chat response for DeepSeek thinking replay.
+		// The reasoning_content must be echoed back on follow-up assistant messages.
+		if sess != nil {
+			for _, choice := range chatResp.Choices {
+				if choice.Message.ReasoningContent != "" && len(choice.Message.ToolCalls) > 0 {
+					var tcIDs []string
+					for _, tc := range choice.Message.ToolCalls {
+						tcIDs = append(tcIDs, tc.ID)
+					}
+					cacheReasoningForChat(sess, tcIDs, choice.Message.ReasoningContent)
+				}
+			}
 		}
 
 	case config.ProtocolGoogleGenAI:
@@ -690,6 +709,11 @@ func (s *Server) handleAdapterStream(
 			return
 		}
 
+		// Prepend cached reasoning for DeepSeek thinking chain replay.
+		if s.pluginRegistry != nil && sess != nil {
+			prependCachedReasoningForChat(chatReq, sess)
+		}
+
 		chatClient, ok := s.chatClients[candidate.ProviderKey]
 		if !ok {
 			log.Error("adapter stream: no chat client", "provider", candidate.ProviderKey)
@@ -990,6 +1014,27 @@ func (s *Server) handleAdapterStream(
 			if chatAdapter, ok := chatProvider.(*chat.ChatProviderAdapter); ok {
 				if events := chatAdapter.StreamBuffer(); len(events) > 0 {
 					streamRecord.ChatStreamEvents = events
+
+					// Cache reasoning from Chat stream for DeepSeek thinking replay.
+					if sess != nil {
+						var streamReasoning string
+						var streamToolCallIDs []string
+						for _, ev := range events {
+							for _, sc := range ev.Choices {
+								if sc.Delta.ReasoningContent != "" {
+									streamReasoning = sc.Delta.ReasoningContent
+								}
+								for _, tc := range sc.Delta.ToolCalls {
+									if tc.ID != "" {
+										streamToolCallIDs = append(streamToolCallIDs, tc.ID)
+									}
+								}
+							}
+						}
+						if streamReasoning != "" && len(streamToolCallIDs) > 0 {
+							cacheReasoningForChat(sess, streamToolCallIDs, streamReasoning)
+						}
+					}
 				}
 			}
 		}
@@ -1149,4 +1194,78 @@ func hasThinkingBlock(content []anthropic.ContentBlock) bool {
 		}
 	}
 	return false
+}
+
+
+// prependCachedReasoningForChat restores reasoning_content on assistant messages
+// for DeepSeek thinking chain replay across conversation turns.
+// It looks up cached thinking blocks from the session state and sets them
+// as reasoning_content on assistant messages that have tool_calls.
+//
+// For the Chat protocol path, this is the equivalent of prependCachedThinking
+// (which operates on Anthropic messages).
+func prependCachedReasoningForChat(chatReq *chat.ChatRequest, sess *session.Session) {
+	// Session may be nil or missing ExtensionData (e.g., session resume after restart).
+	// In that case, we still set reasoning_content to empty string — DeepSeek needs
+	// the field present on every assistant message, even if empty.
+	var state *deepseekv4.State
+	if sess != nil {
+		if stateRaw, ok := sess.ExtensionData["deepseek_v4"]; ok {
+			state, _ = stateRaw.(*deepseekv4.State)
+		}
+	}
+
+	for i := range chatReq.Messages {
+		msg := &chatReq.Messages[i]
+		if msg.Role != "assistant" {
+			continue
+		}
+		// Skip if reasoning_content is already set.
+		if msg.ReasoningContent != "" {
+			continue
+		}
+		// Try to find cached thinking by tool call ID.
+		if state != nil {
+			for _, tc := range msg.ToolCalls {
+				if tc.ID == "" {
+					continue
+				}
+				if cached, ok := state.CachedForToolCall(tc.ID); ok {
+					thinking := cached.Thinking
+					if thinking == "" {
+						thinking = cached.Text
+					}
+					if thinking != "" {
+						msg.ReasoningContent = thinking
+						break
+					}
+				}
+			}
+		}
+		// Fallback: set empty reasoning_content to satisfy DeepSeek's requirement
+		// that the field is present on every assistant message.
+		if msg.ReasoningContent == "" && len(msg.ToolCalls) > 0 {
+			msg.ReasoningContent = ""
+		}
+	}
+}
+
+
+// cacheReasoningForChat stores reasoning content from a Chat response
+// into the session extension data for replay on subsequent turns.
+func cacheReasoningForChat(sess *session.Session, toolCallIDs []string, reasoning string) {
+	stateRaw, ok := sess.ExtensionData["deepseek_v4"]
+	if !ok {
+		return
+	}
+	state, ok := stateRaw.(*deepseekv4.State)
+	if !ok {
+		return
+	}
+	// The State caches thinking blocks by tool call ID.
+	anthropicBlock := anthropic.ContentBlock{
+		Type:     "thinking",
+		Thinking: reasoning,
+	}
+	state.RememberForToolCalls(toolCallIDs, anthropicBlock)
 }

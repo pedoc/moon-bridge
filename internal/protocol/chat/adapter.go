@@ -508,7 +508,12 @@ func (a *ChatProviderAdapter) toChatMessage(msg format.CoreMessage) ChatMessage 
 		case "tool_result":
 			textBlocks = append(textBlocks, b)
 		case "reasoning":
-			continue // skip reasoning content
+			// Reasoning blocks become ReasoningContent for providers like DeepSeek
+			// that require it to be echoed back in follow-up requests.
+			if b.ReasoningText != "" {
+				chatMsg.ReasoningContent = b.ReasoningText
+			}
+			continue
 		default:
 			if b.Text != "" {
 				textBlocks = append(textBlocks, b)
@@ -691,6 +696,14 @@ func (a *ChatProviderAdapter) toChatToolChoice(tc format.CoreToolChoice) json.Ra
 // choiceToCoreMessage converts a Choice to a CoreMessage.
 func (a *ChatProviderAdapter) choiceToCoreMessage(choice Choice) format.CoreMessage {
 	content := a.fromChatContent(choice.Message.Content)
+
+	// Prepend reasoning block if reasoning_content is present (DeepSeek etc.).
+	if choice.Message.ReasoningContent != "" {
+		content = append([]format.CoreContentBlock{{
+			Type:          "reasoning",
+			ReasoningText: choice.Message.ReasoningContent,
+		}}, content...)
+	}
 
 	// Add tool calls as tool_use content blocks.
 	if len(choice.Message.ToolCalls) > 0 {
