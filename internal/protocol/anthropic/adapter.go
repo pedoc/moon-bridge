@@ -69,10 +69,126 @@ func (a *AnthropicProviderAdapter) ProviderProtocol() string {
 }
 
 // =========================================================================
-// FromCoreRequest — CoreRequest → *anthropic.MessageRequest
+// Delegate methods — anthropic.MessageRequest ↔ CoreRequest compatibility bridge
 // =========================================================================
 
-// FromCoreRequest converts a CoreRequest into an *anthropic.MessageRequest.
+// FromAnthropicRequest converts an anthropic.MessageRequest to CoreRequest,
+// then delegates to FromCoreRequest. This is the compatibility bridge during
+// migration. DELETE after all callers use CoreRequest.
+func (a *AnthropicProviderAdapter) FromAnthropicRequest(ctx context.Context, req *MessageRequest) (any, error) {
+	coreReq := a.anthropicToCoreRequest(req)
+	return a.FromCoreRequest(ctx, coreReq)
+}
+
+// ToAnthropicResponse converts an anthropic.MessageResponse to CoreResponse,
+// then delegates to ToCoreResponse. DELETE after all callers use CoreResponse.
+func (a *AnthropicProviderAdapter) ToAnthropicResponse(ctx context.Context, resp *MessageResponse) (*format.CoreResponse, error) {
+	return a.ToCoreResponse(ctx, resp)
+}
+
+// anthropicToCoreRequest converts anthropic.MessageRequest → CoreRequest (private helper).
+func (a *AnthropicProviderAdapter) anthropicToCoreRequest(req *MessageRequest) *format.CoreRequest {
+	if req == nil {
+		return nil
+	}
+
+	coreReq := &format.CoreRequest{
+		Model:         req.Model,
+		MaxTokens:     req.MaxTokens,
+		Messages:      make([]format.CoreMessage, 0, len(req.Messages)),
+		System:        a.fromContentBlocks(req.System),
+		Temperature:   req.Temperature,
+		TopP:          req.TopP,
+		TopK:          req.TopK,
+		StopSequences: req.StopSequences,
+		Stream:        req.Stream,
+		Metadata:      req.Metadata,
+		Thinking:      a.toCoreThinkingConfig(req.Thinking),
+		Output:        a.toCoreOutputConfig(req.OutputConfig),
+		CacheControl:  a.toCoreCacheControl(req.CacheControl),
+	}
+
+	// Messages
+	for _, msg := range req.Messages {
+		coreReq.Messages = append(coreReq.Messages, format.CoreMessage{
+			Role:    msg.Role,
+			Content: a.fromContentBlocks(msg.Content),
+		})
+	}
+
+	// Tools
+	if len(req.Tools) > 0 {
+		coreReq.Tools = make([]format.CoreTool, 0, len(req.Tools))
+		for _, t := range req.Tools {
+			coreReq.Tools = append(coreReq.Tools, format.CoreTool{
+				Name:        t.Name,
+				Description: t.Description,
+				InputSchema: t.InputSchema,
+			})
+		}
+	}
+
+	// ToolChoice
+	if req.ToolChoice != nil {
+		coreReq.ToolChoice = &format.CoreToolChoice{
+			Mode: req.ToolChoice.Type,
+			Name: req.ToolChoice.Name,
+		}
+	}
+
+	return coreReq
+}
+
+// toCoreThinkingConfig converts anthropic *ThinkingConfig to *format.CoreThinkingConfig.
+func (a *AnthropicProviderAdapter) toCoreThinkingConfig(tc *ThinkingConfig) *format.CoreThinkingConfig {
+	if tc == nil {
+		return nil
+	}
+	return &format.CoreThinkingConfig{
+		Type:         tc.Type,
+		BudgetTokens: tc.BudgetTokens,
+	}
+}
+
+// toCoreOutputConfig converts anthropic *OutputConfig to *format.CoreOutputConfig.
+func (a *AnthropicProviderAdapter) toCoreOutputConfig(oc *OutputConfig) *format.CoreOutputConfig {
+	if oc == nil {
+		return nil
+	}
+	return &format.CoreOutputConfig{
+		Effort: oc.Effort,
+	}
+}
+
+// toCoreCacheControl converts anthropic *CacheControl to *format.CoreCacheControl.
+func (a *AnthropicProviderAdapter) toCoreCacheControl(cc *CacheControl) *format.CoreCacheControl {
+	if cc == nil {
+		return nil
+	}
+	return &format.CoreCacheControl{
+		Enabled: true,
+		TTLSeconds: parseTTLSeconds(cc.TTL),
+		Strategy:   "auto",
+	}
+}
+
+// parseTTLSeconds parses a duration string like "300s" or "5m" into seconds.
+func parseTTLSeconds(ttl string) int {
+	if ttl == "" {
+		return 0
+	}
+	var seconds int
+	if n, err := fmt.Sscanf(ttl, "%ds", &seconds); err == nil && n == 1 {
+		return seconds
+	}
+	return 0
+}
+
+// =========================================================================
+// FromCoreRequest — CoreRequest → *MessageRequest
+// =========================================================================
+
+// FromCoreRequest converts a CoreRequest into an *MessageRequest.
 //
 // Conversion steps:
 //  1. Call hooks.MutateCoreRequest (plugin modifications to CoreRequest)
@@ -153,17 +269,17 @@ func (a *AnthropicProviderAdapter) FromCoreRequest(ctx context.Context, req *for
 }
 
 // =========================================================================
-// ToCoreResponse — *anthropic.MessageResponse → *format.CoreResponse
+// ToCoreResponse — *MessageResponse → *format.CoreResponse
 // =========================================================================
 
-// ToCoreResponse converts an *anthropic.MessageResponse into a *format.CoreResponse.
+// ToCoreResponse converts an *MessageResponse into a *format.CoreResponse.
 //
 // The response content blocks become a single assistant message. Cache registry
 // is updated from usage signals via CacheManager.
 func (a *AnthropicProviderAdapter) ToCoreResponse(ctx context.Context, resp any) (*format.CoreResponse, error) {
 	msgResp, ok := resp.(*MessageResponse)
 	if !ok {
-		return nil, fmt.Errorf("anthropic adapter: expected *anthropic.MessageResponse, got %T", resp)
+		return nil, fmt.Errorf("anthropic adapter: expected *MessageResponse, got %T", resp)
 	}
 
 	// Map stop_reason to Core status.
