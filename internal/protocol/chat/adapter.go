@@ -400,12 +400,29 @@ func (a *ChatProviderAdapter) ToCoreStream(ctx context.Context, src any) (<-chan
 								state.toolCallIdx++
 							}
 						}
-						emit(format.CoreStreamEvent{
-							Type:        format.CoreToolCallArgsDelta,
-							Index:       state.toolCallIdx - 1,
-							Delta:       string(tc.Function.Arguments),
-							ChoiceIndex: &ci,
-						})
+						// Skip empty argument deltas (avoids accumulating "" at the start).
+						// Decode each JSON string chunk to get the actual content (strips surrounding quotes).
+						// Raw bytes include JSON string quotes (e.g. "" -> empty, "{" -> {, "\"" -> ").
+						if len(tc.Function.Arguments) > 0 {
+							var decoded string
+							if err := json.Unmarshal(tc.Function.Arguments, &decoded); err == nil {
+								if decoded != "" {
+									emit(format.CoreStreamEvent{
+										Type:        format.CoreToolCallArgsDelta,
+										Index:       state.toolCallIdx - 1,
+										Delta:       decoded,
+										ChoiceIndex: &ci,
+									})
+								}
+							} else {
+								emit(format.CoreStreamEvent{
+									Type:        format.CoreToolCallArgsDelta,
+									Index:       state.toolCallIdx - 1,
+									Delta:       string(tc.Function.Arguments),
+									ChoiceIndex: &ci,
+								})
+							}
+						}
 					}
 
 					// Emit content_block.done when finish_reason is set.

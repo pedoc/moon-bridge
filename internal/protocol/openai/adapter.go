@@ -905,11 +905,19 @@ func convertInput(raw json.RawMessage) ([]format.CoreMessage, []format.CoreConte
 
 	messages := make([]format.CoreMessage, 0, len(items))
 	system := make([]format.CoreContentBlock, 0)
-	var pendingToolResults []format.CoreContentBlock
 	var pendingReasoning []format.CoreContentBlock
+	var pendingFCBlocks []format.CoreContentBlock // batch consecutive function_calls
 
 	for _, item := range items {
 		if item.Type == "function_call_output" {
+			// Flush pending function_calls before tool results.
+			if len(pendingFCBlocks) > 0 {
+				messages = append(messages, format.CoreMessage{
+					Role:    "assistant",
+					Content: pendingFCBlocks,
+				})
+				pendingFCBlocks = pendingFCBlocks[:0]
+			}
 			// Flush pending reasoning before tool results.
 			if len(pendingReasoning) > 0 {
 				messages = append(messages, format.CoreMessage{
@@ -918,24 +926,26 @@ func convertInput(raw json.RawMessage) ([]format.CoreMessage, []format.CoreConte
 				})
 				pendingReasoning = pendingReasoning[:0]
 			}
-			// Tool result: collect and flush as user message.
-			pendingToolResults = append(pendingToolResults, format.CoreContentBlock{
-				Type:      "tool_result",
-				ToolUseID: item.CallID,
-				ToolResultContent: []format.CoreContentBlock{
-					{Type: "text", Text: item.Output},
-				},
+			// Each tool result → separate tool-role Core message.
+			messages = append(messages, format.CoreMessage{
+				Role: "tool",
+				Content: []format.CoreContentBlock{{
+					Type:      "tool_result",
+					ToolUseID: item.CallID,
+					ToolResultContent: []format.CoreContentBlock{
+						{Type: "text", Text: item.Output},
+					},
+				}},
 			})
 			continue
 		}
-
-		// Flush pending tool results before non-tool-result items.
-		if len(pendingToolResults) > 0 {
+		// Flush pending function_calls before non-function-call items.
+		if len(pendingFCBlocks) > 0 {
 			messages = append(messages, format.CoreMessage{
-				Role:    "user",
-				Content: copyContentBlocks(pendingToolResults),
+				Role:    "assistant",
+				Content: pendingFCBlocks,
 			})
-			pendingToolResults = pendingToolResults[:0]
+			pendingFCBlocks = pendingFCBlocks[:0]
 		}
 
 		role := item.Role
@@ -953,25 +963,20 @@ func convertInput(raw json.RawMessage) ([]format.CoreMessage, []format.CoreConte
 		switch {
 		case item.Type == "function_call":
 			// function_call in input → tool_use assistant block.
-			var fcBlocks []format.CoreContentBlock
-			// Prepend any pending reasoning blocks.
+			// Collect into pendingFCBlocks to batch consecutive calls into a single assistant message.
 			if len(pendingReasoning) > 0 {
-				fcBlocks = append(fcBlocks, pendingReasoning...)
+				pendingFCBlocks = append(pendingFCBlocks, pendingReasoning...)
 				pendingReasoning = pendingReasoning[:0]
 			}
 			toolInput := json.RawMessage(item.Arguments)
 			if !json.Valid([]byte(item.Arguments)) {
 				toolInput = json.RawMessage(`{}`)
 			}
-			fcBlocks = append(fcBlocks, format.CoreContentBlock{
+			pendingFCBlocks = append(pendingFCBlocks, format.CoreContentBlock{
 				Type:      "tool_use",
 				ToolUseID: firstNonEmpty(item.CallID, item.ID),
 				ToolName:  item.Name,
 				ToolInput: toolInput,
-			})
-			messages = append(messages, format.CoreMessage{
-				Role:    "assistant",
-				Content: fcBlocks,
 			})
 
 		case role == "system" || role == "developer":
@@ -1006,19 +1011,19 @@ func convertInput(raw json.RawMessage) ([]format.CoreMessage, []format.CoreConte
 		}
 	}
 
-	// Flush remaining tool results.
-	if len(pendingToolResults) > 0 {
-		messages = append(messages, format.CoreMessage{
-			Role:    "user",
-			Content: copyContentBlocks(pendingToolResults),
-		})
-	}
-
 	// Flush remaining reasoning blocks (no following assistant message).
 	if len(pendingReasoning) > 0 {
 		messages = append(messages, format.CoreMessage{
 			Role:    "assistant",
 			Content: pendingReasoning,
+		})
+	}
+
+	// Flush any remaining batched function_calls.
+	if len(pendingFCBlocks) > 0 {
+		messages = append(messages, format.CoreMessage{
+			Role:    "assistant",
+			Content: pendingFCBlocks,
 		})
 	}
 
@@ -1261,13 +1266,6 @@ func firstNonEmpty(vals ...string) string {
 func copyContentParts(parts []ContentPart) []ContentPart {
 	out := make([]ContentPart, len(parts))
 	copy(out, parts)
-	return out
-}
-
-// copyContentBlocks returns a shallow copy of a CoreContentBlock slice.
-func copyContentBlocks(blocks []format.CoreContentBlock) []format.CoreContentBlock {
-	out := make([]format.CoreContentBlock, len(blocks))
-	copy(out, blocks)
 	return out
 }
 

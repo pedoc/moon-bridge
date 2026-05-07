@@ -1627,8 +1627,8 @@ func TestToCoreStream_ToolCallArgsDelta(t *testing.T) {
 			toolCallDeltaCount++
 		}
 	}
-	if toolCallDeltaCount != 2 {
-		t.Errorf("tool_call_args.delta count = %d, want 2", toolCallDeltaCount)
+	if toolCallDeltaCount != 1 {
+		t.Errorf("tool_call_args.delta count = %d, want 1", toolCallDeltaCount)
 	}
 }
 
