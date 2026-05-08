@@ -562,12 +562,13 @@ func (a *ChatProviderAdapter) toChatMessage(msg format.CoreMessage) ChatMessage 
 	if len(toolUseBlocks) > 0 {
 		chatMsg.ToolCalls = make([]ToolCall, 0, len(toolUseBlocks))
 		for _, b := range toolUseBlocks {
+			argsStr, _ := json.Marshal(string(b.ToolInput))
 			chatMsg.ToolCalls = append(chatMsg.ToolCalls, ToolCall{
 				ID:   b.ToolUseID,
 				Type: "function",
 				Function: ToolCallFunc{
 					Name:      b.ToolName,
-					Arguments: b.ToolInput,
+					Arguments: json.RawMessage(argsStr),
 				},
 			})
 		}
