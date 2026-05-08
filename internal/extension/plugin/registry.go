@@ -6,10 +6,13 @@ import (
 	"log/slog"
 	"net/http"
 
+	"context"
+
 	"moonbridge/internal/foundation/config"
 	"moonbridge/internal/foundation/logger"
-	"moonbridge/internal/foundation/openai"
 	"moonbridge/internal/protocol/anthropic"
+	"moonbridge/internal/protocol/format"
+	"moonbridge/internal/protocol/openai"
 )
 
 // Registry holds registered plugins and dispatches to their capabilities.
@@ -481,4 +484,37 @@ func (r *Registry) Plugins() []string {
 		names = append(names, p.Name())
 	}
 	return names
+}
+
+// CorePluginHooks builds a format.CorePluginHooks from all registered plugins.
+// Each hook chains all plugins that implement the corresponding capability.
+func (r *Registry) CorePluginHooks() format.CorePluginHooks {
+	hooks := format.CorePluginHooks{}.WithDefaults()
+	for _, p := range r.plugins {
+		// MutateCoreRequest
+		if m, ok := p.(CoreRequestMutator); ok {
+			prev := hooks.MutateCoreRequest
+			hooks.MutateCoreRequest = func(ctx context.Context, req *format.CoreRequest) {
+				if prev != nil { prev(ctx, req) }
+				m.MutateCoreRequest(ctx, req)
+			}
+		}
+		// FilterCoreContent
+		if f, ok := p.(CoreContentFilter); ok {
+			prev := hooks.FilterContent
+			hooks.FilterContent = func(ctx context.Context, block *format.CoreContentBlock) bool {
+				if prev != nil && prev(ctx, block) { return true }
+				return f.FilterCoreContent(ctx, block)
+			}
+		}
+		// RememberCoreContent
+		if rmem, ok := p.(CoreContentRememberer); ok {
+			prev := hooks.RememberContent
+			hooks.RememberContent = func(ctx context.Context, content []format.CoreContentBlock) {
+				if prev != nil { prev(ctx, content) }
+				rmem.RememberCoreContent(ctx, content)
+			}
+		}
+	}
+	return hooks
 }

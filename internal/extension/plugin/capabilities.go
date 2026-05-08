@@ -1,13 +1,15 @@
 package plugin
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"time"
 
 	"moonbridge/internal/foundation/logger"
-	"moonbridge/internal/foundation/openai"
 	"moonbridge/internal/protocol/anthropic"
+	"moonbridge/internal/protocol/format"
+	"moonbridge/internal/protocol/openai"
 
 	foundationdb "moonbridge/internal/foundation/db"
 )
@@ -192,4 +194,21 @@ type DBProvider interface {
 // The returned Consumer may be nil if the plugin is disabled.
 type DBConsumer interface {
 	DBConsumer() foundationdb.Consumer
+}
+
+// --- Core format capabilities (Adapter path) ---
+
+// CoreRequestMutator defines a plugin that can modify a CoreRequest.
+type CoreRequestMutator interface {
+	MutateCoreRequest(ctx context.Context, req *format.CoreRequest)
+}
+
+// CoreContentFilter defines a plugin that can filter Core content blocks.
+type CoreContentFilter interface {
+	FilterCoreContent(ctx context.Context, block *format.CoreContentBlock) bool
+}
+
+// CoreContentRememberer defines a plugin that can remember Core content blocks.
+type CoreContentRememberer interface {
+	RememberCoreContent(ctx context.Context, content []format.CoreContentBlock)
 }

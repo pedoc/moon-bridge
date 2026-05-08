@@ -6,17 +6,18 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"log/slog"
-	"moonbridge/internal/extension/pluginhooks"
 	"moonbridge/internal/foundation/config"
 	"moonbridge/internal/foundation/db"
 	"moonbridge/internal/service/store"
 	"moonbridge/internal/foundation/logger"
 	"moonbridge/internal/protocol/anthropic"
-	"moonbridge/internal/protocol/bridge"
 	"moonbridge/internal/protocol/cache"
+	"moonbridge/internal/protocol/format"
+	"moonbridge/internal/protocol/openai"
 	"moonbridge/internal/service/provider"
 	"moonbridge/internal/service/proxy"
 	"moonbridge/internal/service/runtime"
@@ -55,8 +56,8 @@ func runTransform(ctx context.Context, cfg config.Config, errors io.Writer) erro
 	// === Phase 1: Bootstrap from YAML ===
 
 	// Build multi-provider infrastructure from YAML config.
-	providerDefs := buildProviderDefsFromConfig(cfg)
-	modelRoutes := buildModelRoutesFromConfig(cfg)
+	providerDefs := provider.BuildProviderDefsFromConfig(cfg)
+	modelRoutes := provider.BuildModelRoutesFromConfig(cfg)
 	providerMgr, err := provider.NewProviderManager(providerDefs, modelRoutes)
 	if err != nil {
 		return fmt.Errorf("init provider manager: %w", err)
@@ -67,7 +68,7 @@ func runTransform(ctx context.Context, cfg config.Config, errors io.Writer) erro
 	resolvePerProviderWebSearch(ctx, cfg, providerMgr, errors)
 
 	sessionStats := stats.NewSessionStats()
-	pricing := buildPricingMap(cfg)
+	pricing := provider.BuildPricingFromConfig(cfg)
 	if len(pricing) > 0 {
 		sessionStats.SetPricing(pricing)
 	}
@@ -110,6 +111,7 @@ func runTransform(ctx context.Context, cfg config.Config, errors io.Writer) erro
 	}
 	// Register the config_store consumer for configuration persistence.
 	configStoreConsumer := store.NewConfigStoreConsumer(logger.L())
+	configStoreConsumer.SetExtensionSpecs(BuiltinExtensions().ConfigSpecs())
 	dbRegistry.RegisterConsumer(configStoreConsumer)
 	if err := dbRegistry.Init(ctx, cfg.Persistence.ActiveProvider); err != nil {
 		return fmt.Errorf("init persistence: %w", err)
@@ -129,8 +131,8 @@ func runTransform(ctx context.Context, cfg config.Config, errors io.Writer) erro
 				cfg = *dbCfg
 
 				// Rebuild provider manager and pricing from DB-loaded config.
-				providerDefs = buildProviderDefsFromConfig(cfg)
-				modelRoutes = buildModelRoutesFromConfig(cfg)
+				providerDefs = provider.BuildProviderDefsFromConfig(cfg)
+				modelRoutes = provider.BuildModelRoutesFromConfig(cfg)
 				providerMgr, err = provider.NewProviderManager(providerDefs, modelRoutes)
 				if err != nil {
 					return fmt.Errorf("rebuild provider manager from DB: %w", err)
@@ -138,7 +140,7 @@ func runTransform(ctx context.Context, cfg config.Config, errors io.Writer) erro
 				_ = resolveDefaultClient(providerMgr, errors)
 				resolvePerProviderWebSearch(ctx, cfg, providerMgr, errors)
 
-				pricing = buildPricingMap(cfg)
+				pricing = provider.BuildPricingFromConfig(cfg)
 				if len(pricing) > 0 {
 					sessionStats.SetPricing(pricing)
 				}
@@ -149,27 +151,52 @@ func runTransform(ctx context.Context, cfg config.Config, errors io.Writer) erro
 					logger.Warn("config store 种子导入失败", "error", err)
 				}
 			}
-		} else {
-			logger.Warn("config store 加载失败", "error", loadErr)
+		} else if loadErr != nil {
+			if strings.Contains(loadErr.Error(), "config not seeded") {
+				logger.Info("persistence store is empty, skipping DB config load")
+			} else {
+				logger.Warn("config store 加载失败", "error", loadErr)
+			}
 		}
 	} else {
 		logger.Warn("config store 不可用，跳过持久化引导")
 	}
 
-	// === Phase 3: Build Runtime ===
+		// === Phase 3: Build Runtime ===
 	rt := runtime.NewRuntime(cfg, providerMgr, pricing)
 
 	// === Phase 4: Build Server with Runtime ===
+	// Create shared cache registry (used by both Bridge and Adapter paths).
+	cacheReg := cache.NewMemoryRegistry()
+
+	// Optionally create the experimental adapter registry.
+	// Create the adapter registry for Core format dispatch.
+	adapterReg := format.NewRegistry()
+	coreHooks := plugins.CorePluginHooks()
+
+	// Inbound: OpenAI Responses client adapter.
+	oaiAdapter := openai.NewOpenAIAdapter(cfg, coreHooks)
+	_ = adapterReg.RegisterClient(oaiAdapter)
+	_ = adapterReg.RegisterClientStream(oaiAdapter)
+
+	// Upstream: Anthropic provider adapter with cache manager.
+	cacheMgr := server.NewAdapterCacheManager(cfg.Cache, cacheReg)
+	anthAdapter := anthropic.NewAnthropicProviderAdapter(cfg, cacheMgr, coreHooks)
+	_ = adapterReg.RegisterProvider(anthAdapter)
+	_ = adapterReg.RegisterProviderStream(anthAdapter)
+
+	slog.Info("Adapter dispatch path enabled", "registry", "format.Registry")
+
 	handler := server.New(server.Config{
-		Bridge:         bridge.New(cfg, cache.NewMemoryRegistry(), pluginhooks.PluginHooksFromRegistry(plugins)),
-		Provider:       fallbackProvider,
-		ProviderMgr:    providerMgr,
-		Tracer:         tracer,
-		TraceErrors:    errors,
-		Stats:          sessionStats,
-		PluginRegistry: plugins,
-		AppConfig:      cfg,
-		Runtime:        rt,
+		Provider:        fallbackProvider,
+		ProviderMgr:     providerMgr,
+		Tracer:          tracer,
+		TraceErrors:     errors,
+		Stats:           sessionStats,
+		PluginRegistry:  plugins,
+		AppConfig:       cfg,
+		Runtime:         rt,
+		AdapterRegistry: adapterReg,
 	})
 
 	wrapped := handler
@@ -189,86 +216,6 @@ func resolveDefaultClient(pm *provider.ProviderManager, errors io.Writer) *anthr
 		return nil
 	}
 	return client
-}
-
-// buildProviderDefsFromConfig converts config into provider definition map.
-func buildProviderDefsFromConfig(cfg config.Config) map[string]provider.ProviderConfig {
-	defs := make(map[string]provider.ProviderConfig, len(cfg.ProviderDefs))
-	for key, def := range cfg.ProviderDefs {
-		modelNames := make([]string, 0, len(def.Models))
-		for name := range def.Models {
-			modelNames = append(modelNames, name)
-		}
-		models := make(map[string]provider.ModelMeta, len(def.Models))
-		for name, meta := range def.Models {
-			models[name] = provider.ModelMeta(meta)
-		}
-		defs[key] = provider.ProviderConfig{
-			BaseURL:          def.BaseURL,
-			APIKey:           def.APIKey,
-			Version:          def.Version,
-			UserAgent:        def.UserAgent,
-			Protocol:         def.Protocol,
-			WebSearchSupport: string(def.WebSearchSupport),
-			ModelNames:       modelNames,
-			Models:           models,
-			Offers:           def.Offers,
-		}
-	}
-	return defs
-}
-
-// buildModelRoutesFromConfig converts config model entries into route definitions.
-func buildModelRoutesFromConfig(cfg config.Config) map[string]provider.ModelRoute {
-	routes := make(map[string]provider.ModelRoute, len(cfg.Routes))
-	for alias, route := range cfg.Routes {
-		routes[alias] = provider.ModelRoute{
-			Provider: route.Provider,
-			Name:     route.Model,
-		}
-	}
-	return routes
-}
-
-// buildPricingMap computes a pricing map from routes and provider models.
-func buildPricingMap(cfg config.Config) map[string]stats.ModelPricing {
-	pricing := make(map[string]stats.ModelPricing)
-	for alias, route := range cfg.Routes {
-		if route.InputPrice > 0 || route.OutputPrice > 0 || route.CacheWritePrice > 0 || route.CacheReadPrice > 0 {
-			pricing[alias] = stats.ModelPricing{
-				InputPrice:      route.InputPrice,
-				OutputPrice:     route.OutputPrice,
-				CacheWritePrice: route.CacheWritePrice,
-				CacheReadPrice:  route.CacheReadPrice,
-			}
-		}
-	}
-	for providerKey, def := range cfg.ProviderDefs {
-		for modelName, meta := range def.Models {
-			slug := providerKey + "/" + modelName
-			newSlug := modelName + "(" + providerKey + ")"
-			if _, exists := pricing[slug]; exists {
-				if _, exists := pricing[newSlug]; !exists {
-					pricing[newSlug] = pricing[slug]
-				}
-				continue
-			}
-			if meta.InputPrice > 0 || meta.OutputPrice > 0 || meta.CacheWritePrice > 0 || meta.CacheReadPrice > 0 {
-				p := stats.ModelPricing{
-					InputPrice:      meta.InputPrice,
-					OutputPrice:     meta.OutputPrice,
-					CacheWritePrice: meta.CacheWritePrice,
-					CacheReadPrice:  meta.CacheReadPrice,
-				}
-				pricing[slug] = p
-				pricing[newSlug] = p
-				if _, exists := pricing[modelName]; !exists {
-					pricing[modelName] = p
-				}
-			}
-		}
-	}
-	return pricing
 }
 
 // webSearchProber interface and following functions are unchanged.
@@ -300,6 +247,10 @@ func resolvePerProviderWebSearch(ctx context.Context, cfg config.Config, pm *pro
 				slog.Info("网页搜索注入模式已启用", "provider", key)
 			default:
 				resolved := probeProviderWebSearch(ctx, key, pm, errors)
+				if resolved == "disabled" && cfg.TavilyAPIKey != "" {
+					resolved = "injected"
+					slog.Info("网页搜索自动探测失败，回退到注入模式", "provider", key)
+				}
 				pm.SetResolvedWebSearch(key, resolved)
 			}
 		case config.ProtocolOpenAIResponse:
@@ -529,4 +480,3 @@ func DumpConfigSchema(configPath string) error {
 		ExtensionSpecs: BuiltinExtensions().ConfigSpecs(),
 	})
 }
-
