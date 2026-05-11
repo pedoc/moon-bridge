@@ -13,27 +13,28 @@ Moon Bridge 是一个 Go 语言编写的 HTTP 代理/协议转换服务器。对
 │                  Service 层                       │
 │  server(路由/处理)  adapter_dispatch(协议分发)    │
 │  provider(路由)     stats(统计)      trace(跟踪)   │
-│  api(管理 API)      store(持久化)    runtime(运行时) │
-│  proxy(Capture代理)  bridge(备用)                 │
+│  proxy(Capture代理)  api(管理 API)                │
+│  store(持久化)       runtime(运行时)              │
 ├─────────────────────────────────────────────────┤
 │                  Protocol 层                      │
 │  format(核心类型/注册表)  anthropic(Anthropic 适配) │
 │  openai(OpenAI 适配)    google(GenAI 适配)        │
 │  chat(OpenAI Chat 适配) cache(缓存)               │
 ├─────────────────────────────────────────────────┤
-│                  基础层                           │
-│  config(配置)  logger(日志)  openai_dto(共享 DTO)  │
-│  modelref(模型引用)  session(会话)  db(数据库)     │
+│                  基础组件（直接位于 internal/ 下） │
+│  config(配置)  logger(日志)  openai_dto(共享 DTO) │
+│  modelref(模型引用)  session(会话)  db(数据库)    │
 ├─────────────────────────────────────────────────┤
 │                  Extension 层                     │
-│  deepseek_v4  visual  websearch  metrics         │
-│  plugin(插件注册)  codex(Codex模型目录)  db(数据库) │
+│  deepseek_v4  visual  websearch  websearchinjected│
+│  kimi_workaround  metrics  codex(Codex模型目录)   │
+│  plugin(插件注册/接口)  db(持久化后端: SQLite/D1) │
 └─────────────────────────────────────────────────┘
 ```
 
-### 基础层
+### 基础组件（internal/ 顶层包）
 
-不依赖任何 Protocol 或 Service 组件，包直接位于 `internal/` 下：
+不依赖任何 Protocol 或 Service 组件，包直接位于 `internal/` 下（无 `foundation/` 子目录）：
 
 - `internal/config` — YAML 配置加载、校验、Schema 生成、热重载。支持 `config.schema.json` 和 `config.example.yml`
 - `internal/logger` — 基于 `slog.Handler` 接口封装的日志系统，支持 consumer 模式
@@ -135,15 +136,23 @@ adapter_dispatch.go (Adapter 分发)
 
 ## Adapter 体系
 
-所有 Adapter 实现 `internal/format/adapter.go` 中定义的接口：
+所有 Adapter 实现 `internal/format/adapter.go` 中定义的接口，通过 `internal/format/registry.go` 中的 `Registry` 管理注册：
 
 ```go
+
+type ClientAdapter interface {
+    Protocol() string
+    ToCoreRequest(context.Context, []byte) (*CoreRequest, error)
+    FromCoreResponse(context.Context, *CoreResponse) ([]byte, error)
+}
+
 type ProviderAdapter interface {
     ProviderProtocol() string
     FromCoreRequest(context.Context, *CoreRequest) (any, error)
     ToCoreResponse(context.Context, any) (*CoreResponse, error)
 }
 type ProviderStreamAdapter interface { ... }
+type ClientStreamAdapter interface { ... }
 ```
 
 ### 跨协议工具调用
@@ -157,7 +166,7 @@ type ProviderStreamAdapter interface { ... }
 
 ### Web Search 工具注入
 
-`InjectWebSearchTool`（定义在 `internal/service/server/server.go`）在 Transform 模式下动态注入 `web_search` 工具。支持 `auto` / `enabled` / `disabled` / `injected` 四种模式。
+`InjectWebSearchTool`（定义在 `internal/service/server/server.go`）在 Transform 模式下动态注入 `web_search` 工具到请求中。支持 `auto` / `enabled` / `disabled` / `injected` 四种模式。注入式搜索在 `adapter_dispatch.go` 中通过 `websearchinjected.WrapProvider()` 包装上游 Provider 实现自动编排。
 
 ## 缓存系统
 
@@ -165,7 +174,7 @@ type ProviderStreamAdapter interface { ... }
 
 ## 请求跟踪系统
 
-`trace.enabled: true` 时，完整的请求链路保存到 `data/trace/`。每个请求同时保留 OpenAI 格式和上游格式的请求/响应。
+请求跟踪通过 `internal/service/trace` 和 `internal/service/server/trace` 实现。跟踪文件按 `session/模型名/类别/序号.json` 组织，每条记录包含完整请求/响应数据，支持 Chat、Response、Anthropic 三个分类目录。
 
 ## 管理 API
 
@@ -174,6 +183,11 @@ type ProviderStreamAdapter interface { ... }
 | 端点 | 方法 | 功能 |
 |------|------|------|
 | `/api/v1/config` | GET/PUT | 获取/更新运行时配置 |
-| `/api/v1/codex/config` | GET | 生成 Codex TOML 配置 |
+| `/api/v1/models` | GET | 列出配置中的模型定义 |
+| `/api/v1/models/{slug}` | GET/PUT/DELETE | 管理模型定义 |
 | `/api/v1/providers` | GET/POST/DELETE | 管理 Provider |
-| `/api/v1/sessions/{id}` | GET | 获取会话用量统计 |
+| `/api/v1/providers/{key}/offers/{model}` | PATCH/DELETE | 管理 Provider 模型报价 |
+
+此外，启用 metrics extension 后会注册 `/v1/admin/metrics` 端点提供请求指标查询。
+
+Codex TOML 配置通过 CLI 标志 `-print-codex-config <model>` 生成，非 API 端点。

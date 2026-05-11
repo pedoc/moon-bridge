@@ -397,7 +397,7 @@ func collectStream(stream anthropic.Stream) ([]anthropic.StreamEvent, error) {
 	for {
 		event, err := stream.Next()
 		if err != nil {
-			if err.Error() == "EOF" {
+			if err == io.EOF {
 				break
 			}
 			return events, err

@@ -54,19 +54,23 @@ server {
 ### Dockerfile（多阶段构建）
 
 ```dockerfile
-FROM golang:1.25 AS builder
-WORKDIR /app
+FROM golang:1.26-bookworm AS builder
+
+ENV GOPROXY=https://goproxy.cn,direct
+WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -o moonbridge ./cmd/moonbridge
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/moonbridge ./cmd/moonbridge
 
-FROM alpine:latest
-RUN apk --no-cache add ca-certificates
+FROM gcr.io/distroless/static-debian12:nonroot
 WORKDIR /app
-COPY --from=builder /app/moonbridge .
+COPY --from=builder /out/moonbridge /app/moonbridge
+COPY config.example.yml /app/config.example.yml
 EXPOSE 38440
-CMD ["./moonbridge", "-config", "config.yml"]
+USER nonroot:nonroot
+ENTRYPOINT ["/app/moonbridge"]
+CMD ["-config", "/config/config.yml", "-addr", "0.0.0.0:38440"]
 ```
 
 ### Docker Compose
@@ -77,7 +81,7 @@ services:
     build: .
     ports: ["38440:38440"]
     volumes:
-      - ./config.yml:/etc/moonbridge/config.yml
+      - ./config.yml:/config/config.yml
       - ./data:/app/data
 ```
 

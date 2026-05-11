@@ -203,9 +203,12 @@ proxy:
 
 | 标志 | 默认值 | 说明 |
 |------|--------|------|
-| `-config` | `config.yml` | 配置文件路径 |
+| `-config` | `${XDG_CONFIG_HOME}/moonbridge/config.yml` | 配置文件路径 |
 | `-addr` | 来自配置文件 | 覆盖监听地址 |
-| `-auth-token` | 来自配置文件 | 覆盖认证 Token |
-| `-trace` | `false` | 启用请求跟踪 |
-| `-log-level` | `"info"` | 日志级别 |
-| `-log-format` | `"text"` | 日志格式 |
+| `-mode` | 来自配置文件 | 覆盖运行模式（Transform/CaptureAnthropic/CaptureResponse） |
+| `-print-addr` | — | 打印配置的监听地址后退出 |
+| `-print-mode` | — | 打印配置的运行模式后退出 |
+| `-print-default-model` | — | 打印默认模型别名后退出 |
+| `-print-codex-model` | — | 打印 Codex 模型后退出 |
+| `-print-codex-config <model>` | — | 为指定模型生成 Codex config.toml 后退出 |
+| `-dump-config-schema` | — | 生成 config.schema.json 后退出 |

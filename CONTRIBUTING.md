@@ -34,16 +34,16 @@
 ### 测试要求
 
 - 单元测试覆盖新增代码
-- 协议转换必须包含 E2E 测试
-- 运行全量测试确保无回归
+- 协议转换应包含 E2E 测试（`internal/e2e/`）
+- 运行 `make test` 确保无回归
 
 ## 添加新 Provider
 
-1. 在 `config.go` 中添加 `ProviderDef` 字段
-2. 实现 Protocol Adapter
-3. 注册到 `format.Registry`
-4. 在 `dispatch.go` 中添加协议分支
-5. 添加 E2E 测试
+1. 在 `internal/config/config.go` 中添加协议常量（如 `ProtocolMyAdapter`）
+2. 创建 `internal/protocol/<adapter>/` 包，实现 `format.ProviderAdapter` 和 `format.ProviderStreamAdapter`
+3. 在 `internal/service/app/app.go` 中将 Adapter 注册到 `format.Registry`
+4. 在 `internal/service/server/adapter_dispatch.go` 中添加协议分发分支
+5. 添加 E2E 测试到 `internal/e2e/`
 
 ## 许可证
 

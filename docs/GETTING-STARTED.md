@@ -12,7 +12,7 @@
 ### 获取代码
 
 ```bash
-git clone https://github.com/ZhiYi-R/moon-bridge.git
+git clone git@github.com:ZhiYi-R/moon-bridge.git
 cd moon-bridge
 ```
 
@@ -106,5 +106,5 @@ curl http://127.0.0.1:38440/v1/models
 ## 下一步
 
 - [CookBook.md](CookBook.md) — 常见用法场景
-- [ARCHITECTURE.md](ARCHITECTURE.md) — 系统架构详解
+- [architecture.md](architecture.md) — 系统架构详解
 - [CONFIGURATION.md](CONFIGURATION.md) — 完整配置指南

@@ -18,10 +18,11 @@ internal/
     codex/                # Codex 模型目录
     db/                   # 数据库 Provider（SQLite / D1）
     deepseek_v4/          # DeepSeek V4 推理优化
+    kimi_workaround/      # Kimi 模型 Tool Call 轮次限制
     metrics/              # 用量指标
-    plugin/               # 三方插件注册
-    visual/               # 视觉模型分发
-    websearch/            # Web Search 自动模式
+    plugin/               # Plugin 接口与注册表
+    visual/               # 视觉模型分发（CoreProvider 模式）
+    websearch/            # Web Search 编排器
     websearchinjected/    # Web Search 注入模式
   config/                 # YAML 配置加载与校验
   logger/                 # 日志系统（slog 封装）
@@ -29,18 +30,17 @@ internal/
   modelref/               # 模型引用解析
   session/                # 会话管理
   db/                     # 数据库抽象与注册表
-  format/                 # Core 类型定义（CoreRequest/CoreResponse/Registry）
+  format/                 # Core 类型 + Adapter 接口 + Registry
   protocol/               # 协议转换层
     anthropic/            # Anthropic Messages Adapter
     cache/                # Prompt 缓存规划
     chat/                 # OpenAI Chat Adapter
-    format/               # Registry + adapter 接口
     google/               # Google Gemini (GenAI) Adapter
     openai/               # OpenAI Responses Adapter
   service/                # 业务编排层
     api/                  # 管理 REST API（路由在 router.go）
-    app/                  # 应用生命周期管理
-    bridge/               # 备用桥接层
+    app/                  # 应用生命周期 + Extension 目录
+    bridge/               # （空目录，预留）
     e2e/                  # 服务层 E2E 测试
     provider/             # Provider 管理器
     proxy/                # Capture 模式代理
@@ -85,8 +85,9 @@ go test ./internal/e2e/... -v -count=1
 cd internal/e2e && PROVIDER=deepseek go test -v -count=1 -run TestAnthropicE2E
 cd internal/e2e && PROVIDER=gemini go test -v -count=1 -run TestGoogleGenAIE2E
 
-# 构建并运行
-make run
+# 使用 Makefile 构建与测试
+make build
+make test
 ```
 
 ## 添加新 Provider Adapter
