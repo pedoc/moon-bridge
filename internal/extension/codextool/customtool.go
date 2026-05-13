@@ -109,8 +109,10 @@ func OutputItemFromBlock(
 	switch spec.Kind {
 	case ToolLocalShell:
 		return "local_shell_call", "", "", "", true, toolInput
-	case ToolApplyPatch, ToolRaw, ToolExec:
+	case ToolRaw:
 		return "custom_tool_call", spec.OpenAIName, "", InputFromRaw(toolInput), false, nil
+	case ToolApplyPatch, ToolExec:
+		return "function_call", spec.OpenAIName, "", string(toolInput), false, nil
 	case ToolFunction:
 		return "function_call", spec.OpenAIName, spec.Namespace, string(toolInput), false, nil
 	default:
