@@ -2,6 +2,7 @@ package codextool
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"moonbridge/internal/format"
@@ -109,10 +110,12 @@ func OutputItemFromBlock(
 	switch spec.Kind {
 	case ToolLocalShell:
 		return "local_shell_call", "", "", "", true, toolInput
+	case ToolApplyPatch:
+		return "custom_tool_call", spec.OpenAIName, "", RebuildApplyPatchGrammar(blockName, toolInput), false, nil
+	case ToolExec:
+		return "custom_tool_call", spec.OpenAIName, "", RebuildExecGrammar(toolInput), false, nil
 	case ToolRaw:
 		return "custom_tool_call", spec.OpenAIName, "", InputFromRaw(toolInput), false, nil
-	case ToolApplyPatch, ToolExec:
-		return "function_call", spec.OpenAIName, "", string(toolInput), false, nil
 	case ToolFunction:
 		return "function_call", spec.OpenAIName, spec.Namespace, string(toolInput), false, nil
 	default:
@@ -367,4 +370,96 @@ func AnnotateCoreTool(t *format.CoreTool, kind ToolKind, openAIName, namespace s
 	t.Extensions["codex_tool_kind"] = string(kind)
 	t.Extensions["codex_openai_name"] = openAIName
 	t.Extensions["codex_namespace"] = namespace
+}
+// RebuildApplyPatchGrammar reconstructs the raw apply_patch grammar from
+// a proxy tool name and its structured input, for use as custom_tool_call.input.
+func RebuildApplyPatchGrammar(proxyName string, input json.RawMessage) string {
+	action := strings.TrimPrefix(proxyName, "apply_patch_")
+	if action == proxyName {
+		action = "batch"
+	}
+	switch action {
+	case "add_file", "replace_file":
+		var p struct {
+			Path    string `json:"path"`
+			Content string `json:"content"`
+		}
+		if err := json.Unmarshal(input, &p); err != nil || p.Path == "" {
+			return string(input)
+		}
+		return fmt.Sprintf("*** Add File: %s\n%s\n*** End Patch", p.Path, p.Content)
+	case "delete_file":
+		var p struct{ Path string `json:"path"` }
+		if err := json.Unmarshal(input, &p); err != nil || p.Path == "" {
+			return string(input)
+		}
+		return fmt.Sprintf("*** Delete File: %s\n*** End Patch", p.Path)
+	case "update_file":
+		var p struct {
+			Path   string `json:"path"`
+			Hunks []map[string]any `json:"hunks"`
+		}
+		if err := json.Unmarshal(input, &p); err != nil || p.Path == "" {
+			return string(input)
+		}
+		var b strings.Builder
+		fmt.Fprintf(&b, "*** Update File: %s\n", p.Path)
+		for _, hunk := range p.Hunks {
+			ctx, _ := hunk["context"].(string)
+			if ctx != "" {
+				fmt.Fprintf(&b, "*** Context: %s\n", ctx)
+			}
+			if lines, ok := hunk["lines"].([]any); ok {
+				for _, l := range lines {
+					if lm, ok := l.(map[string]any); ok {
+						op, _ := lm["op"].(string)
+						text, _ := lm["text"].(string)
+						switch op {
+						case "add":
+							b.WriteString("+ " + text + "\n")
+						case "remove":
+							b.WriteString("- " + text + "\n")
+						default:
+							b.WriteString("  " + text + "\n")
+						}
+					}
+				}
+			}
+		}
+		fmt.Fprintf(&b, "*** End Patch")
+		return b.String()
+	case "batch":
+		var p struct {
+			Operations []map[string]any `json:"operations"`
+		}
+		if err := json.Unmarshal(input, &p); err != nil {
+			return string(input)
+		}
+		var b strings.Builder
+		for _, op := range p.Operations {
+			opType, _ := op["type"].(string)
+			path, _ := op["path"].(string)
+			switch opType {
+			case "add_file", "replace_file":
+				content, _ := op["content"].(string)
+				fmt.Fprintf(&b, "*** Add File: %s\n%s\n*** End Patch\n", path, content)
+			case "delete_file":
+				fmt.Fprintf(&b, "*** Delete File: %s\n*** End Patch\n", path)
+			case "update_file":
+				fmt.Fprintf(&b, "*** Update File: %s\n*** End Patch\n", path)
+			}
+		}
+		return b.String()
+	default:
+		return string(input)
+	}
+}
+
+// RebuildExecGrammar reconstructs the raw exec grammar from structured input.
+func RebuildExecGrammar(input json.RawMessage) string {
+	var p struct{ Source string `json:"source"` }
+	if err := json.Unmarshal(input, &p); err != nil || p.Source == "" {
+		return string(input)
+	}
+	return p.Source
 }

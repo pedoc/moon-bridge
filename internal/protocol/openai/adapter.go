@@ -1500,9 +1500,23 @@ case "function":
 			codextool.AnnotateCoreTool(&ct, codextool.ToolLocalShell, name, "")
 			return []format.CoreTool{ct}
 		}
-		// ToolApplyPatch and ToolExec: keep original name, use structured schema.
-		// DO NOT proxy-expand — the model must call the original tool name so
-		// Codex can match it on the response side for custom_tool_call routing.
+		if codextool.IsApplyPatchGrammar(grammar) {
+			proxyTools := codextool.ApplyPatchProxyCoreTools(name)
+			for i := range proxyTools {
+				codextool.AnnotateCoreTool(&proxyTools[i], codextool.ToolApplyPatch, name, "")
+			}
+			return proxyTools
+		}
+		if codextool.IsExecGrammar(grammar) {
+			ct := format.CoreTool{
+				Name:        name,
+				Description: codextool.ExecProxyDescription(),
+				InputSchema: codextool.ExecProxySchema(),
+			}
+			codextool.AnnotateCoreTool(&ct, codextool.ToolExec, name, "")
+			return []format.CoreTool{ct}
+		}
+		// Other custom tools: keep original name with raw input schema
 		ct := format.CoreTool{
 			Name:        name,
 			Description: customToolDescription(tool, grammar),
