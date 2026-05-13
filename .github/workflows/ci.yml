@@ -118,15 +118,21 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+          skip-decompress: true
 
-      - name: Create draft release and upload assets
+      - name: Create release and upload assets
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
           gh release create "${TAG}" --draft --title "${TAG}" --notes "待补充 release notes" --verify-tag
 
-          find dist -type f -name '*.tar.gz' -o -name '*.zip' | while read asset; do
+          echo "Files in dist:"
+          find dist -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) | sort
+
+          while IFS= read -r asset; do
             echo "Uploading: ${asset}"
             gh release upload "${TAG}" "${asset}" --clobber
-          done
+          done < <(find dist -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) | sort)
+
+          gh release edit "${TAG}" --draft=false
